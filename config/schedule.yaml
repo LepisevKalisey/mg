@@ -1,3 +1,35 @@
+# Scheduling configuration
+
+# Digest publication schedule
 digest:
-  cron: "0 9 * * *"
+  cron: "0 9 * * *"  # Every day at 9 AM
   tz: "UTC"
+  retry_interval: 3600  # 1 hour in seconds
+  max_retries: 3
+
+# Source fetching schedule
+source_fetch:
+  cron: "*/15 * * * *"  # Every 15 minutes
+  tz: "UTC"
+  batch_size: 10
+  timeout: 300  # 5 minutes in seconds
+
+# Topic processing schedule
+topic_processing:
+  cron: "*/30 * * * *"  # Every 30 minutes
+  tz: "UTC"
+  batch_size: 20
+  timeout: 600  # 10 minutes in seconds
+
+# Summary generation schedule
+summary_generation:
+  cron: "0 */2 * * *"  # Every 2 hours
+  tz: "UTC"
+  batch_size: 5
+  timeout: 1200  # 20 minutes in seconds
+
+# Database maintenance schedule
+db_maintenance:
+  cron: "0 2 * * 0"  # Every Sunday at 2 AM
+  tz: "UTC"
+  retention_days: 30  # Keep data for 30 days

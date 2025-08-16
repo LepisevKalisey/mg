@@ -1,0 +1,68 @@
+# Storage configuration
+
+# Database settings
+database:
+  # Connection settings
+  connection:
+    max_connections: 20  # Maximum number of connections in the pool
+    min_connections: 5   # Minimum number of connections in the pool
+    connection_timeout: 30  # Connection timeout in seconds
+    idle_timeout: 300  # Idle connection timeout in seconds
+    retry_attempts: 3  # Number of connection retry attempts
+    retry_delay: 5  # Delay between retry attempts in seconds
+  
+  # Query settings
+  query:
+    statement_timeout: 60000  # Statement timeout in milliseconds
+    lock_timeout: 10000  # Lock timeout in milliseconds
+    idle_in_transaction_session_timeout: 60000  # Idle in transaction timeout in milliseconds
+  
+  # Migration settings
+  migration:
+    auto_migrate: true  # Automatically run migrations on startup
+    migration_table: "schema_migrations"  # Migration table name
+    migration_dir: "migrations"  # Migration directory
+
+# File storage settings
+file_storage:
+  # Local file storage
+  local:
+    enabled: true
+    root_dir: "./data/files"  # Root directory for file storage
+    max_file_size: 104857600  # Maximum file size in bytes (100 MB)
+    allowed_extensions: [".jpg", ".jpeg", ".png", ".gif", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt"]
+  
+  # S3-compatible storage
+  s3:
+    enabled: false
+    endpoint: "https://s3.amazonaws.com"
+    region: "us-east-1"
+    bucket: "mg-digest"
+    prefix: "files/"
+    access_key_env: "S3_ACCESS_KEY"  # Environment variable for access key
+    secret_key_env: "S3_SECRET_KEY"  # Environment variable for secret key
+
+# Cache settings
+cache:
+  # Memory cache
+  memory:
+    enabled: true
+    max_size: 1073741824  # Maximum cache size in bytes (1 GB)
+    ttl: 3600  # Default TTL in seconds
+  
+  # Redis cache
+  redis:
+    enabled: false
+    host: "localhost"
+    port: 6379
+    db: 0
+    password_env: "REDIS_PASSWORD"  # Environment variable for password
+    ttl: 3600  # Default TTL in seconds
+
+# Data retention policy
+retention:
+  messages: 90  # Days to keep messages
+  summaries: 365  # Days to keep summaries
+  digests: 730  # Days to keep digests
+  logs: 30  # Days to keep logs
+  metrics: 90  # Days to keep metrics

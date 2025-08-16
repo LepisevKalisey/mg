@@ -1,4 +1,43 @@
+# Pricing configuration for LLM models (USD per 1K tokens)
+
+# OpenAI models
 openai:
+  # GPT-3.5 Turbo
   gpt-3.5-turbo:
-    prompt: 0.001
+    prompt: 0.0015
     completion: 0.002
+  
+  # GPT-3.5 Turbo 16K
+  gpt-3.5-turbo-16k:
+    prompt: 0.003
+    completion: 0.004
+  
+  # GPT-4
+  gpt-4:
+    prompt: 0.03
+    completion: 0.06
+  
+  # GPT-4 Turbo
+  gpt-4-turbo:
+    prompt: 0.01
+    completion: 0.03
+  
+  # GPT-3.5 Turbo Instruct
+  gpt-3.5-turbo-instruct:
+    prompt: 0.0015
+    completion: 0.002
+
+# Anthropic models
+anthropic:
+  claude-2:
+    prompt: 0.01
+    completion: 0.03
+  claude-instant-1:
+    prompt: 0.0025
+    completion: 0.008
+
+# Cost tracking settings
+cost_tracking:
+  enabled: true
+  budget_alert_threshold: 50.0  # USD
+  daily_budget_limit: 10.0  # USD

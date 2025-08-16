@@ -73,10 +73,18 @@ def _cron_match(dt: datetime, fields: Tuple[Set[int], Set[int], Set[int], Set[in
 # Digest trigger and scheduler loop
 # ---------------------------------------------------------------------------
 async def trigger_digest() -> None:
-    """Placeholder for digest assembly trigger."""
+    """Trigger digest assembly."""
     global DIGEST_TRIGGERED_TOTAL
     DIGEST_TRIGGERED_TOTAL += 1
-    logger.info("trigger_digest")
+    logger.info("Triggering digest generation")
+    
+    try:
+        from app.worker.digest import generate_digest
+        result = await generate_digest()
+        logger.info(f"Digest generated successfully: {result['id']}")
+    except Exception as e:
+        logger.error(f"Error generating digest: {e}")
+        raise
 
 
 async def scheduler_loop(fields, tz: ZoneInfo) -> None:

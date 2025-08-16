@@ -1,1 +1,21 @@
-replay_hours: 24
+# Owner-specific configuration inputs
+
+# Watcher settings
+replay_hours: 24  # Hours of history to replay when starting watcher
+fetch_interval_minutes: 15  # How often to fetch new messages
+
+# Content filtering
+min_post_length: 50  # Minimum character count for posts to be processed
+max_post_length: 5000  # Maximum character count for posts to be processed
+filter_duplicates: true  # Whether to filter out duplicate content
+duplication_threshold: 0.8  # Similarity threshold for duplicate detection (0.0-1.0)
+
+# Digest settings
+digest_post_count: 10  # Number of posts to include in each digest
+digest_min_topics: 3  # Minimum number of topics to include in a digest
+digest_max_topics: 7  # Maximum number of topics to include in a digest
+digest_title_format: "Дайджест новостей за {date}"  # Format string for digest titles
+
+# Admin notification settings
+notify_on_errors: true  # Send notifications on critical errors
+notify_on_digests: true  # Send notifications when digests are ready for review

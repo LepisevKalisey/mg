@@ -1,0 +1,63 @@
+# Main application configuration
+
+# Database configuration
+database:
+  url: ${DATABASE_URL}  # Will be taken from environment variable
+  pool_size: 5
+  max_overflow: 10
+  pool_timeout: 30
+  pool_recycle: 1800
+
+# Telegram API configuration
+telegram:
+  api_id: ${TELEGRAM_API_ID}  # Will be taken from environment variable
+  api_hash: ${TELEGRAM_API_HASH}  # Will be taken from environment variable
+  session_dir: "./sessions"
+  connection_retries: 5
+  retry_delay: 5  # seconds
+
+# Security settings
+security:
+  master_key: ${MASTER_KEY}  # Will be taken from environment variable
+  token_expiry: 86400  # 24 hours in seconds
+  hash_algorithm: "sha256"
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./logs/app.log"
+  max_size: 10485760  # 10 MB
+  backup_count: 5
+
+# API server configuration
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  timeout: 60
+  cors_origins: ["*"]
+
+# Watcher configuration
+watcher:
+  poll_interval: 300  # 5 minutes in seconds
+  batch_size: 100
+  max_retries: 3
+  retry_delay: 60  # seconds
+
+# Worker configuration
+worker:
+  concurrency: 2
+  prefetch_count: 10
+  task_timeout: 300  # 5 minutes in seconds
+
+# Moderation settings
+moderation:
+  auto_approve: false
+  notification_email: ${NOTIFICATION_EMAIL}  # Will be taken from environment variable
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  prometheus_port: 9090
+  health_check_interval: 60  # seconds

@@ -1,3 +1,41 @@
+# LLM models configuration
+
+# Model for generating summaries
 summary:
   provider: openai
   model: gpt-3.5-turbo
+  temperature: 0.3
+  max_tokens: 1000
+  top_p: 1.0
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+
+# Model for generating digests
+digest:
+  provider: openai
+  model: gpt-3.5-turbo
+  temperature: 0.5
+  max_tokens: 2000
+  top_p: 1.0
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+
+# Model for topic classification
+topic_classifier:
+  provider: openai
+  model: gpt-3.5-turbo
+  temperature: 0.2
+  max_tokens: 500
+  top_p: 1.0
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+
+# Fallback model (if primary is unavailable)
+fallback:
+  provider: openai
+  model: gpt-3.5-turbo-instruct
+  temperature: 0.5
+  max_tokens: 1000
+  top_p: 1.0
+  frequency_penalty: 0.0
+  presence_penalty: 0.0

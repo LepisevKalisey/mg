@@ -206,13 +206,15 @@ class Watcher:
 
     # -- ingest ----------------------------------------------------------
 
-    def _insert_or_update_post(self, source_id: int, message) -> None:
+    async def _insert_or_update_post(self, source_id: int, message) -> None:
         text = message.message or ""
         if not text.strip():
             return
         msg_id = message.id
         published_at = message.date
         sim = _compute_simhash(text)
+        
+        # First, store the raw post in the database for historical purposes
         conn = _connect_db(self.db_url)
         try:
             cur = conn.execute(
@@ -226,43 +228,53 @@ class Watcher:
                     (text, sim, row[0]),
                 )
                 conn.commit()
-                return
-
-            status = None
-            window = dt.datetime.utcnow() - dt.timedelta(hours=12)
-            cur = conn.execute(
-                "SELECT simhash FROM raw_posts WHERE source_id=? AND fetched_at>?",
-                (source_id, window),
-            )
-            for (prev_sim,) in cur.fetchall():
-                if prev_sim is None:
-                    continue
-                if _hamming(sim, prev_sim) <= 3:
-                    status = "duplicate"
-                    break
-            conn.execute(
-                """
-                INSERT INTO raw_posts
-                    (source_id, tg_message_id, text, published_at, simhash, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (source_id, msg_id, text, published_at, sim, status),
-            )
-            conn.commit()
+                # Don't return here, we still want to process the message
+            else:
+                status = None
+                window = dt.datetime.utcnow() - dt.timedelta(hours=12)
+                cur = conn.execute(
+                    "SELECT simhash FROM raw_posts WHERE source_id=? AND fetched_at>?",
+                    (source_id, window),
+                )
+                for (prev_sim,) in cur.fetchall():
+                    if prev_sim is None:
+                        continue
+                    if _hamming(sim, prev_sim) <= 3:
+                        status = "duplicate"
+                        break
+                conn.execute(
+                    """
+                    INSERT INTO raw_posts
+                        (source_id, tg_message_id, text, published_at, simhash, status)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (source_id, msg_id, text, published_at, sim, status),
+                )
+                conn.commit()
         finally:
             conn.close()
+        
+        # Now process the message using the MessageProcessor
+        try:
+            from app.watcher.message_processor import MessageProcessor
+            processor = MessageProcessor()
+            await processor.process_message(message, source_id)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error processing message: {e}")
+            # Don't raise the exception, we want to continue processing other messages
 
     async def _on_new(self, event) -> None:
         source_id = self.sources.get(event.chat_id)
         if not source_id:
             return
-        self._insert_or_update_post(source_id, event.message)
+        await self._insert_or_update_post(source_id, event.message)
 
     async def _on_edit(self, event) -> None:
         source_id = self.sources.get(event.chat_id)
         if not source_id:
             return
-        self._insert_or_update_post(source_id, event.message)
+        await self._insert_or_update_post(source_id, event.message)
 
     async def _on_delete(self, event) -> None:
         source_id = self.sources.get(event.chat_id)
@@ -286,7 +298,7 @@ class Watcher:
         since = dt.datetime.utcnow() - dt.timedelta(hours=self.replay_hours)
         for tg_id, src_id in self.sources.items():
             async for msg in client.iter_messages(tg_id, offset_date=since, reverse=True):
-                self._insert_or_update_post(src_id, msg)
+                await self._insert_or_update_post(src_id, msg)
 
     async def run(self) -> None:
         client = await self._ensure_client()
