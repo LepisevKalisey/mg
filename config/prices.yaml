@@ -1,0 +1,4 @@
+openai:
+  gpt-3.5-turbo:
+    prompt: 0.001
+    completion: 0.002
