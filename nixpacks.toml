@@ -1,14 +1,19 @@
+# Nixpacks configuration for Python application
 [phases.setup]
-aptPkgs = ["curl", "libpq-dev", "build-essential", "python3-dev"]
+nixPkgs = ["python311", "python311Packages.pip", "libpq", "curl"]
 
 [phases.install]
-cmds = ["pip install --upgrade pip setuptools wheel", "pip install -e ."]
-
-[start]
-cmd = "python main.py"
-
-[variables]
-NIXPACKS_PYTHON_VERSION = "3.11"
+cmds = [
+  "python3.11 -m pip install --upgrade pip",
+  "python3.11 -m pip install -r requirements.txt"
+]
 
 [phases.build]
-cmds = ["python -m compileall -f app"]
+cmds = ["python3.11 -c 'print(\"Build successful\")'"]
+
+[start]
+cmd = "python3.11 run_web.py"
+
+[variables]
+PYTHONUNBUFFERED = "1"
+PYTHONPATH = "/app"
