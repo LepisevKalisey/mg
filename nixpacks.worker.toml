@@ -1,4 +1,4 @@
-# Nixpacks configuration for Python application - production ready
+# Nixpacks configuration for worker service
 [phases.setup]
 nixPkgs = [
   "python311",
@@ -25,11 +25,10 @@ cmds = [
 ]
 
 [start]
-cmd = "python run_web.py"
+cmd = "python -m app.worker"
 
 [variables]
 PYTHONUNBUFFERED = "1"
 PYTHONPATH = "/app"
-PORT = "8000"
 DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/mg"
 REDIS_URL = "redis://localhost:6379"
