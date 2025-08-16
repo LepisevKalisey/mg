@@ -1,0 +1,14 @@
+# Coolify deployment configuration
+
+# Main web service - use default Dockerfile
+web:
+  dockerfile: "Dockerfile"
+  port: 8000
+
+# Watcher service - use watcher Dockerfile  
+watcher:
+  dockerfile: "Dockerfile.watcher"
+
+# Worker service - use worker Dockerfile
+worker:
+  dockerfile: "Dockerfile.worker"
