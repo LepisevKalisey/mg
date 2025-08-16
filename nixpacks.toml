@@ -1,0 +1,8 @@
+[phases.setup]
+aptPkgs = ["curl", "libpq-dev", "build-essential"]
+
+[phases.install]
+cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+
+[start]
+cmd = "python main.py"
