@@ -2,6 +2,9 @@
 [phases.setup]
 nixPkgs = [
   "python311",
+  "python311Packages.pip",
+  "python311Packages.setuptools",
+  "python311Packages.wheel",
   "postgresql",
   "curl",
   "gcc"
@@ -28,3 +31,4 @@ PYTHONPATH = "/app"
 PORT = "8000"
 DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/mg"
 REDIS_URL = "redis://localhost:6379"
+NIXPACKS_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
