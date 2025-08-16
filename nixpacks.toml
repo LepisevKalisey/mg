@@ -1,8 +1,14 @@
 [phases.setup]
-aptPkgs = ["curl", "libpq-dev", "build-essential"]
+aptPkgs = ["curl", "libpq-dev", "build-essential", "python3-dev"]
 
 [phases.install]
-cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+cmds = ["pip install --upgrade pip setuptools wheel", "pip install -e ."]
 
 [start]
 cmd = "python main.py"
+
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.11"
+
+[phases.build]
+cmds = ["python -m compileall -f app"]
