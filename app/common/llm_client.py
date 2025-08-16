@@ -5,8 +5,6 @@ import os
 import time
 from typing import Any, Dict
 
-import requests
-
 from .errors import LLMError
 
 
@@ -52,6 +50,8 @@ class LLMClient:
 
     # ---- provider implementations ----------------------------------
     def _openai_complete(self, prompt: str, **kwargs: Any) -> str:
+        import requests
+
         headers = {
             "Authorization": f"Bearer {self.api_key}",
         }
@@ -68,6 +68,8 @@ class LLMClient:
         return data["choices"][0]["message"]["content"]
 
     def _anthropic_complete(self, prompt: str, **kwargs: Any) -> str:
+        import requests
+
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
