@@ -5,6 +5,13 @@ import os
 import time
 from typing import Any, Dict
 
+
+try:  # pragma: no cover - optional dependency
+    import requests
+except Exception:  # pragma: no cover - requests might be missing
+    requests = None  # type: ignore
+
+
 from .errors import LLMError
 
 
@@ -50,11 +57,17 @@ class LLMClient:
 
     # ---- provider implementations ----------------------------------
     def _openai_complete(self, prompt: str, **kwargs: Any) -> str:
+
         import requests
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
         }
+
+        if not requests:
+            raise LLMError("requests library not available")
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -68,7 +81,12 @@ class LLMClient:
         return data["choices"][0]["message"]["content"]
 
     def _anthropic_complete(self, prompt: str, **kwargs: Any) -> str:
+
         import requests
+
+
+        if not requests:
+            raise LLMError("requests library not available")
 
         headers = {
             "x-api-key": self.api_key,
