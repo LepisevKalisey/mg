@@ -2,7 +2,6 @@
 [phases.setup]
 nixPkgs = [
   "python311",
-  "python311Packages.pip",
   "python311Packages.setuptools",
   "python311Packages.wheel",
   "postgresql",
@@ -12,19 +11,18 @@ nixPkgs = [
 
 [phases.install]
 cmds = [
-  "python -m pip install --no-cache-dir --upgrade pip setuptools wheel",
-  "python -m pip install --no-cache-dir -r requirements.txt"
+  "python3.11 -m pip install --no-cache-dir -r requirements.txt"
 ]
 
 [phases.build]
 cmds = [
-  "python -m compileall -f app",
-  "python -c 'import psycopg2; print(\"PostgreSQL driver ready\")'",
-  "python -c 'import redis; print(\"Redis client ready\")'"
+  "python3.11 -m compileall -f app",
+  "python3.11 -c 'import psycopg2; print(\"PostgreSQL driver ready\")'",
+  "python3.11 -c 'import redis; print(\"Redis client ready\")'"
 ]
 
 [start]
-cmd = "python run_web.py"
+cmd = "python3.11 run_web.py"
 
 [variables]
 PYTHONUNBUFFERED = "1"
