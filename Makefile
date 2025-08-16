@@ -1,6 +1,9 @@
 COMPOSE := docker compose -f docker/docker-compose.yml
 DATABASE_URL ?= sqlite:///app.db
 
+
+.PHONY: migrate seed test e2e
+
 .PHONY: up down logs migrate seed test e2e
 
 up:
@@ -11,6 +14,7 @@ down:
 
 logs:
 	$(COMPOSE) logs -f
+
 
 migrate:
 	DATABASE_URL=$(DATABASE_URL) alembic upgrade head
