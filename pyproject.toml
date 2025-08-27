@@ -1,9 +1,0 @@
-[build-system]
-requires = ["setuptools>=42", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "mg-digest-bot"
-version = "0.1.0"
-description = "Telegram digest bot for creating summary channels"
-requires-python = ">=3.11"
