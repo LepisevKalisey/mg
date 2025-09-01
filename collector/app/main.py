@@ -25,8 +25,8 @@ API_HASH = os.getenv("API_HASH")
 SESSION_DIR = os.getenv("SESSION_DIR", "sessions")
 SESSION_NAME = os.getenv("SESSION_NAME", "mtproto")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ALLOWED_TG_IDS = {int(x) for x in (os.getenv("ALLOWED_TG_IDS", "").split(",") if x.strip())}
-ROLE_ADMINS = {int(x) for x in (os.getenv("ROLE_ADMINS", "").split(",") if x.strip())}
+ALLOWED_TG_IDS = {int(x) for x in os.getenv("ALLOWED_TG_IDS", "").split(",") if x.strip()}
+ROLE_ADMINS = {int(x) for x in os.getenv("ROLE_ADMINS", "").split(",") if x.strip()}
 ALLOWED_IDS = {i for i in (ALLOWED_TG_IDS | ROLE_ADMINS) if i}
 
 # Ensure session dir exists
