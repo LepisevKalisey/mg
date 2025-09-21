@@ -3,9 +3,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Установим зависимости сборки для telethon (минимально)
+# Установим зависимости сборки для telethon (минимально) + curl для отладки health/checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./requirements.txt
