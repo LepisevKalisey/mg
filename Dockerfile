@@ -18,8 +18,9 @@ COPY app ./app
 RUN mkdir -p /app/data/pending /app/data/approved /app/data/sessions
 
 ENV PYTHONUNBUFFERED=1
+ENV SERVICE=assistant
 
-EXPOSE 8001
+EXPOSE 8001 8003
 
-# Запускаем API
-CMD ["uvicorn", "app.collector.main:app", "--host", "0.0.0.0", "--port", "8001"]
+# Запускаем API (авто-выбор по SERVICE)
+CMD ["sh", "-c", "if [ \"$SERVICE\" = \"collector\" ]; then uvicorn app.collector.main:app --host 0.0.0.0 --port 8001; else uvicorn app.assistant.main:app --host 0.0.0.0 --port 8003; fi"]

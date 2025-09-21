@@ -11,7 +11,7 @@ services:
     ports:
       - "8001:8001"
     volumes:
-      - ./data:/app/data
+      - /app/data
     restart: unless-stopped
 
   assistant:
@@ -25,5 +25,5 @@ services:
     ports:
       - "8003:8003"
     volumes:
-      - ./data:/app/data
+      - /app/data
     restart: unless-stopped
