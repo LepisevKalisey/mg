@@ -19,6 +19,8 @@ logger = logging.getLogger("collector.telegram")
 class TelegramMonitor:
     def __init__(self) -> None:
         session_path = os.path.join(settings.SESSIONS_DIR, "mtproto")
+        # Гарантируем наличие директории для файла сессии до инициализации TelegramClient
+        os.makedirs(settings.SESSIONS_DIR, exist_ok=True)
         # Для user-сессии используем сохранённый файл сессии
         self.client = TelegramClient(
             session=session_path,
