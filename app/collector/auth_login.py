@@ -37,7 +37,7 @@ SESSIONS_DIR = os.path.join(DATA_DIR, "sessions")
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 # Режим авторизации: code (по коду) или qr (через QR/tg://login)
-AUTH_METHOD = os.getenv("AUTH_METHOD", "code").strip().lower()
+AUTH_METHOD = os.getenv("AUTH_METHOD", "qr").strip().lower()
 
 # Возможность форсировать отправку кода по SMS (по умолчанию выключено — используется код в приложении "Telegram")
 FORCE_SMS = os.getenv("FORCE_SMS", "0") in ("1", "true", "True", "yes", "on")
@@ -47,7 +47,7 @@ AUTO_FALLBACK_SMS = os.getenv("AUTO_FALLBACK_SMS", "0") in ("1", "true", "True",
 AUTO_FALLBACK_WAIT = int(os.getenv("AUTO_FALLBACK_WAIT", "75"))  # сек
 
 # Авто-переход на QR после ожидания in-app кода
-AUTO_SWITCH_TO_QR = os.getenv("AUTO_SWITCH_TO_QR", "0") in ("1", "true", "True", "yes", "on")
+AUTO_SWITCH_TO_QR = os.getenv("AUTO_SWITCH_TO_QR", "1") in ("1", "true", "True", "yes", "on")
 AUTO_SWITCH_TO_QR_WAIT = int(os.getenv("AUTO_SWITCH_TO_QR_WAIT", "60"))
 
 # Контроль параметров QR авторизации
