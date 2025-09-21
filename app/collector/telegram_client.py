@@ -40,7 +40,7 @@ class TelegramMonitor:
         await self.client.connect()
         self._authorized = await self.client.is_user_authorized()
         if not self._authorized:
-            logger.error("Telethon is not authorized. Run interactive auth first (app/collector/auth_login.py) with PHONE or PHONE_NUMBER in .env.")
+            logger.error("Telethon is not authorized. Ensure mtproto.session exists in %s and matches API_ID/API_HASH.", settings.SESSIONS_DIR)
             return
 
         # Регистрируем обработчик событий только если есть список каналов
