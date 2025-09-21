@@ -30,15 +30,52 @@ async def on_startup():
     os.makedirs(settings.APPROVED_DIR, exist_ok=True)
     logger.info("Assistant service started (webhook mode)")
 
+    # Автоконфигурация вебхука
+    if not settings.SERVICE_URL:
+        logger.warning("SERVICE_URL_ASSISTANT не задан — пропускаю автоконфигурацию вебхука")
+        return
+
+    target_url = settings.SERVICE_URL.rstrip("/") + "/telegram/webhook"
+
+    # 1) Узнаем текущий webhook
+    info = _tg_api("getWebhookInfo", {})
+    curr_url = (info or {}).get("result", {}).get("url") if isinstance(info, dict) else None
+
+    # 2) Если вебхук не совпадает — выставляем
+    if curr_url != target_url:
+        body = {
+            "url": target_url,
+            # Небольшие ограничения для снижения нагрузки
+            "max_connections": 20,
+            "allowed_updates": ["callback_query"],
+        }
+        if settings.WEBHOOK_SECRET:
+            body["secret_token"] = settings.WEBHOOK_SECRET
+        set_res = _tg_api("setWebhook", body)
+        ok = bool(set_res and set_res.get("ok", False))
+        if ok:
+            logger.info(f"Webhook set to: {target_url}")
+        else:
+            logger.warning(f"setWebhook failed: {set_res}")
+    else:
+        logger.info(f"Webhook already set to: {curr_url}")
+
 
 @app.get("/health")
 async def health():
+    # Покажем текущие параметры и url вебхука
+    wh_info = _tg_api("getWebhookInfo", {}) or {}
+    curr_url = wh_info.get("result", {}).get("url") if isinstance(wh_info, dict) else None
     return JSONResponse({
         "service": "assistant",
         "status": "ok",
         "data_dirs": {
             "pending": settings.PENDING_DIR,
             "approved": settings.APPROVED_DIR,
+        },
+        "webhook": {
+            "expected": (settings.SERVICE_URL.rstrip("/") + "/telegram/webhook") if settings.SERVICE_URL else None,
+            "current": curr_url,
         }
     })
 
@@ -136,6 +173,13 @@ def _reject(filename: str) -> bool:
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     try:
+        # Проверка секрета вебхука (если задан)
+        if settings.WEBHOOK_SECRET:
+            hdr_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if hdr_secret != settings.WEBHOOK_SECRET:
+                logger.warning("Webhook request with invalid secret; ignoring")
+                return JSONResponse({"ok": True})
+
         upd = await request.json()
     except Exception:
         logger.exception("Invalid JSON in webhook request")

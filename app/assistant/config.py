@@ -30,6 +30,9 @@ class Settings:
 
         # Telegram Bot
         self.BOT_TOKEN = _get_env("BOT_TOKEN", required=True)
+        # Публичный URL сервиса для вебхука и опциональный секрет
+        self.SERVICE_URL = _get_env("SERVICE_URL_ASSISTANT")
+        self.WEBHOOK_SECRET = _get_env("TELEGRAM_WEBHOOK_SECRET")
 
 
 settings = Settings()
