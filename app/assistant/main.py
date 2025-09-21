@@ -65,7 +65,8 @@ async def on_startup():
 async def health():
     # Покажем текущие параметры и url вебхука
     wh_info = _tg_api("getWebhookInfo", {}) or {}
-    curr_url = wh_info.get("result", {}).get("url") if isinstance(wh_info, dict) else None
+    result = wh_info.get("result", {}) if isinstance(wh_info, dict) else {}
+    curr_url = result.get("url")
     return JSONResponse({
         "service": "assistant",
         "status": "ok",
@@ -76,8 +77,20 @@ async def health():
         "webhook": {
             "expected": (settings.SERVICE_URL.rstrip("/") + "/telegram/webhook") if settings.SERVICE_URL else None,
             "current": curr_url,
+            "pending_update_count": result.get("pending_update_count"),
+            "ip_address": result.get("ip_address"),
+            "last_error_date": result.get("last_error_date"),
+            "last_error_message": result.get("last_error_message"),
+            "max_connections": result.get("max_connections"),
+            "allowed_updates": result.get("allowed_updates"),
         }
     })
+
+
+@app.get("/debug/webhook-info")
+async def debug_webhook_info():
+    info = _tg_api("getWebhookInfo", {}) or {}
+    return JSONResponse(info)
 
 
 # --- Вспомогательные функции ---
@@ -170,9 +183,16 @@ def _reject(filename: str) -> bool:
 
 
 # --- Webhook endpoint ---
+@app.get("/telegram/webhook")
+async def telegram_webhook_get():
+    # Диагностика маршрутизации через публичный URL
+    return JSONResponse({"ok": True, "mode": "diagnostic", "endpoint": "/telegram/webhook"})
+
+
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     try:
+        logger.info("Webhook hit (POST)")
         # Проверка секрета вебхука (если задан)
         if settings.WEBHOOK_SECRET:
             hdr_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
@@ -181,6 +201,11 @@ async def telegram_webhook(request: Request):
                 return JSONResponse({"ok": True})
 
         upd = await request.json()
+        try:
+            keys = list(upd.keys()) if isinstance(upd, dict) else []
+            logger.info(f"Webhook update keys: {keys}")
+        except Exception:
+            pass
     except Exception:
         logger.exception("Invalid JSON in webhook request")
         return JSONResponse({"ok": True})
