@@ -8,10 +8,10 @@ services:
     #container_name: mg-collector
     env_file:
       - .env
-    #ports:
-    #  - "8001:8001"
-    #volumes:
-    #  - data:/app/data
+    ports:
+      - "8001:8001"
+    volumes:
+      - data:/app/data
     restart: unless-stopped
 
   assistant:
