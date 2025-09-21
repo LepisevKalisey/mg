@@ -31,9 +31,5 @@ class Settings:
         # Telegram Bot
         self.BOT_TOKEN = _get_env("BOT_TOKEN", required=True)
 
-        # Поллинг Telegram API
-        self.POLL_TIMEOUT = int(_get_env("ASSISTANT_POLL_TIMEOUT", "25"))  # long-poll seconds
-        self.POLL_INTERVAL = float(_get_env("ASSISTANT_POLL_INTERVAL", "0.5"))  # pause between polls (when empty)
-
 
 settings = Settings()
