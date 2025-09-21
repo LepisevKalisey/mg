@@ -8,8 +8,8 @@ services:
     container_name: mg-collector
     #env_file:
     #  - .env
-    ports:
-      - "8001:8001"
+    #ports:
+    #  - "8001:8001"
     volumes:
       - /app/data
     restart: unless-stopped
@@ -22,8 +22,8 @@ services:
     #env_file:
     #  - .env
     command: ["uvicorn", "app.assistant.main:app", "--host", "0.0.0.0", "--port", "8003"]
-    ports:
-      - "8003:8003"
+    #ports:
+    #  - "8003:8003"
     volumes:
       - /app/data
     restart: unless-stopped
