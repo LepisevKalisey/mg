@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - /home/extdrv/mg/:/app/data
