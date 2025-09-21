@@ -20,7 +20,7 @@ RUN mkdir -p /app/data/pending /app/data/approved /app/data/sessions
 
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 8001
+EXPOSE 8001 8003
 
 # Запускаем API
 CMD ["uvicorn", "app.collector.main:app", "--host", "0.0.0.0", "--port", "8001"]

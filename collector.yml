@@ -5,6 +5,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    command: ["uvicorn", "app.collector.main:app", "--host", "0.0.0.0", "--port", "8001"]
     restart: unless-stopped
     volumes:
       - /home/extdrv/mg/:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
