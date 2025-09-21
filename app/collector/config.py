@@ -45,6 +45,11 @@ class Settings:
         self.APPROVED_DIR = os.path.join(self.DATA_DIR, "approved")
         self.SESSIONS_DIR = os.path.join(self.DATA_DIR, "sessions")
 
+        # Позволяем переопределить директорию сессий отдельно от DATA_DIR
+        sess_env = _get_env("SESSIONS_DIR")
+        if sess_env:
+            self.SESSIONS_DIR = sess_env
+
         # Editor bot config
         self.BOT_TOKEN = _get_env("BOT_TOKEN")
         self.EDITORS_CHANNEL_ID = _get_env("EDITORS_CHANNEL_ID")

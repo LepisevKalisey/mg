@@ -21,6 +21,26 @@ class TelegramMonitor:
         session_path = os.path.join(settings.SESSIONS_DIR, "mtproto")
         # Гарантируем наличие директории для файла сессии до инициализации TelegramClient
         os.makedirs(settings.SESSIONS_DIR, exist_ok=True)
+        
+        # Проверка возможности записи в директорию/файл сессии — частая причина sqlite3 readonly database
+        try:
+            _test_path = os.path.join(settings.SESSIONS_DIR, ".writetest")
+            with open(_test_path, "w", encoding="utf-8") as _f:
+                _f.write("ok")
+            os.remove(_test_path)
+        except Exception as e:
+            logger.error(
+                "Sessions dir '%s' is not writable: %s. This will cause sqlite3 'readonly database'. "
+                "Ensure Docker volume is mounted read-write and permissions/ownership are correct.",
+                settings.SESSIONS_DIR, e
+            )
+        _sess_file = session_path + ".session"
+        if os.path.exists(_sess_file) and not os.access(_sess_file, os.W_OK):
+            logger.error(
+                "Session file '%s' is not writable. Fix permissions or remount volume. ",
+                _sess_file
+            )
+
         # Для user-сессии используем сохранённый файл сессии
         self.client = TelegramClient(
             session=session_path,
@@ -37,7 +57,16 @@ class TelegramMonitor:
         return self._authorized
 
     async def start(self) -> None:
-        await self.client.connect()
+        try:
+            await self.client.connect()
+        except Exception as e:
+            logger.exception("Failed to connect Telegram client: %s", e)
+            if "readonly" in str(e).lower():
+                logger.error(
+                    "Likely cause: session SQLite is read-only. Check mount mode and permissions for '%s'",
+                    settings.SESSIONS_DIR,
+                )
+            return
         self._authorized = await self.client.is_user_authorized()
         if not self._authorized:
             logger.error("Telethon is not authorized. Ensure mtproto.session exists in %s and matches API_ID/API_HASH.", settings.SESSIONS_DIR)
