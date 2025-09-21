@@ -6,12 +6,12 @@ services:
       context: .
       dockerfile: Dockerfile
     #container_name: mg-collector
-    env_file:
-      - .env
-    ports:
-      - "8001:8001"
-    volumes:
-      - data:/app/data
+    #env_file:
+    #  - .env
+    #ports:
+    #  - "8001:8001"
+    #volumes:
+    #  - /app/data
     restart: unless-stopped
 
   assistant:
