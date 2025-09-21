@@ -10,8 +10,8 @@ services:
     #  - .env
     #ports:
     #  - "8001:8001"
-    #volumes:
-    #  - /app/data
+    volumes:
+      - /home/extdrv/mg/:/app/data
     restart: unless-stopped
 
   assistant:
@@ -25,7 +25,8 @@ services:
     #ports:
     #  - "8003:8003"
     #volumes:
-    #  - data:/app/data
+    volumes:
+      - /home/extdrv/mg/:/app/data
     restart: unless-stopped
 
 volumes:
