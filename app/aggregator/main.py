@@ -2,10 +2,9 @@ import os
 import json
 import glob
 import logging
-+import re
-+import html
-from typing import List, Dict, Any, Optional
-+from typing import List, Dict, Any, Optional, Match
+import re
+import html
+from typing import List, Dict, Any, Optional, Match
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -69,52 +68,33 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
     lines.append("Выведи только итоговый дайджест в Markdown по указанным правилам.")
     return "\n".join(lines)
 
-+
-+def _markdown_to_html_safe(text: str) -> str:
-+    """Конвертирует простые Markdown-ссылки [text](url) в <a href="url">text</a>
-+    и экранирует остальной текст для безопасной отправки как HTML в Bot API.
-+    Поддерживаем только http/https ссылки. Эмодзи и кириллица сохраняются.
-+    """
-+    # 1) Заменим Markdown-ссылки на плейсхолдеры
-+    placeholders: List[str] = []
-+    def repl(m: Match) -> str:
-+        title = m.group(1)
-+        url = m.group(2)
-+        anchor = f'<a href="{html.escape(url, quote=True)}">{html.escape(title)}</a>'
-+        placeholders.append(anchor)
-+        return f"__LINK_PLACEHOLDER_{len(placeholders)-1}__"
-+
-+    pattern = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
-+    tmp = pattern.sub(repl, text)
-+
-+    # 2) Экранируем весь текст как HTML
-+    escaped = html.escape(tmp)
-+
-+    # 3) Возвращаем плейсхолдеры якорями
-+    for i, a in enumerate(placeholders):
-+        escaped = escaped.replace(f"__LINK_PLACEHOLDER_{i}__", a)
-+
-+    return escaped
-+
-    # Строим компактный промпт для модели: заголовок канала + ссылка + текст
-    lines: List[str] = [
-        "Ты — помощник, который делает краткое, ёмкое саммари новостей на русском языке.",
-        "Сжато, по пунктам, с заголовками. Укажи источники (имя канала и ссылку).",
-    ]
-    for it in items:
-        p = it["payload"]
-        title = p.get("channel_title") or p.get("channel_name") or "Канал"
-        username = p.get("channel_username")
-        msg_id = p.get("message_id")
-        url = f"https://t.me/{username}/{msg_id}" if username and msg_id else ""
-        text = p.get("text") or (p.get("media") or {}).get("caption") or ""
-        # Обрезаем слишком длинные
-        if text and len(text) > 4000:
-            text = text[:4000] + "…"
-        block = f"\n### {title}\n{url}\n{text}".strip()
-        lines.append(block)
-    lines.append("\nВыведи результат в формате: \n- [Заголовок] Краткое содержание (Источник: ИмяКанала — ссылка)")
-    return "\n".join(lines)
+
+def _markdown_to_html_safe(text: str) -> str:
+    """Конвертирует простые Markdown-ссылки [text](url) в <a href="url">text</a>
+    и экранирует остальной текст для безопасной отправки как HTML в Bot API.
+    Поддерживаем только http/https ссылки. Эмодзи и кириллица сохраняются.
+    """
+    # 1) Заменим Markdown-ссылки на плейсхолдеры
+    placeholders: List[str] = []
+    def repl(m: Match) -> str:
+        title = m.group(1)
+        url = m.group(2)
+        anchor = f'<a href="{html.escape(url, quote=True)}">{html.escape(title)}</a>'
+        placeholders.append(anchor)
+        return f"__LINK_PLACEHOLDER_{len(placeholders)-1}__"
+
+    pattern = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+    tmp = pattern.sub(repl, text)
+
+    # 2) Экранируем весь текст как HTML
+    escaped = html.escape(tmp)
+
+    # 3) Возвращаем плейсхолдеры якорями
+    for i, a in enumerate(placeholders):
+        escaped = escaped.replace(f"__LINK_PLACEHOLDER_{i}__", a)
+
+    return escaped
+
 
 
 def _use_gemini(prompt: str) -> str:
@@ -233,30 +213,32 @@ def publish_now(limit: Optional[int] = None):
         try:
             logger.info(f"Publishing to Telegram: chat_id={settings.TARGET_CHANNEL_ID} text_len={len(summary)}")
             api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
-+            html_text = _markdown_to_html_safe(summary)
+            html_text = _markdown_to_html_safe(summary)
             body = {
                 "chat_id": settings.TARGET_CHANNEL_ID,
--                "text": summary,
-+                "text": html_text,
-                 "disable_web_page_preview": True,
--                "parse_mode": "Markdown",
-+                "parse_mode": "HTML",
-             }
-             req = urlrequest.Request(api_url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
-             with urlrequest.urlopen(req, timeout=15) as resp:
-                 published = (resp.status == 200)
-                 if not published:
-                     logger.warning(f"Bot API non-200 response: {resp.status}")
-         except HTTPError as he:
-             try:
-                 err_body = he.read().decode("utf-8")
-             except Exception:
-                 err_body = str(he)
-             logger.error(f"Bot API HTTPError: {he.code} {err_body}")
-         except URLError as ue:
-             logger.error(f"Bot API URLError: {ue}")
-         except Exception as e:
-             logger.exception(f"Bot API request failed: {e}")
+                "text": html_text,
+                "disable_web_page_preview": True,
+                "parse_mode": "HTML",
+            }
+            req = urlrequest.Request(
+                api_url,
+                data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urlrequest.urlopen(req, timeout=15) as resp:
+                published = (resp.status == 200)
+                if not published:
+                    logger.warning(f"Bot API non-200 response: {resp.status}")
+        except HTTPError as he:
+            try:
+                err_body = he.read().decode("utf-8")
+            except Exception:
+                err_body = str(he)
+            logger.error(f"Bot API HTTPError: {he.code} {err_body}")
+        except URLError as ue:
+            logger.error(f"Bot API URLError: {ue}")
+        except Exception as e:
+            logger.exception(f"Bot API request failed: {e}")
 
     removed = []
     if wrote_ok and published:
