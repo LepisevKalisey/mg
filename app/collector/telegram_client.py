@@ -26,6 +26,8 @@ from telethon.tl.types import (
     MessageEntitySpoiler,
     MessageEntityBlockquote,
 )
+from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
 
 from .config import settings
 from .storage import save_pending_message
@@ -69,6 +71,14 @@ class TelegramMonitor:
         self._task: Optional[asyncio.Task] = None
         self._started = False
         self._authorized = False
+
+        # Храним EventBuilder-ы для возможности динамического обновления фильтров
+        self._eh_new_msg_builder: Optional[events.NewMessage] = None
+        self._eh_album_builder: Optional[events.Album] = None
+
+        # Тихие часы: ручной флаг и опциональное расписание (строка вида "22:00-08:00")
+        self._quiet_mode: bool = False
+        self._quiet_schedule: Optional[str] = None
 
     @property
     def authorized(self) -> bool:
@@ -130,6 +140,155 @@ class TelegramMonitor:
             logger.warning("No channels configured. Set MONITORING_CHANNELS or CHANNELS_FILE")
             return None
         return settings.MONITORING_CHANNELS
+
+    async def refresh_handlers(self, channels: List[str]) -> None:
+        """Пере-регистрируем event handlers под новый список каналов без рестарта."""
+        try:
+            # Снимем старые обработчики
+            if self._eh_new_msg_builder is not None:
+                try:
+                    self.client.remove_event_handler(self._on_new_message, self._eh_new_msg_builder)
+                except Exception:
+                    pass
+                self._eh_new_msg_builder = None
+            if self._eh_album_builder is not None:
+                try:
+                    self.client.remove_event_handler(self._on_new_album, self._eh_album_builder)
+                except Exception:
+                    pass
+                self._eh_album_builder = None
+
+            if not channels:
+                logger.warning("Channels list is empty. Event handlers are not registered.")
+                return
+
+            # Регистрируем новые обработчики
+            nm_builder = events.NewMessage(chats=channels)
+            al_builder = events.Album(chats=channels)
+            self.client.add_event_handler(self._on_new_message, nm_builder)
+            self.client.add_event_handler(self._on_new_album, al_builder)
+            self._eh_new_msg_builder = nm_builder
+            self._eh_album_builder = al_builder
+            logger.info("Event handlers registered for channels: %s", ", ".join(map(str, channels)))
+        except Exception:
+            logger.exception("Failed to refresh event handlers")
+
+    async def set_channels(self, channels: List[str]) -> None:
+        """Обновить список каналов в памяти и обработчики. Файл конфигурации обновляется извне."""
+        # Убираем дубликаты и пустые
+        normalized = []
+        seen = set()
+        for ch in channels:
+            ch = (ch or '').strip()
+            if not ch:
+                continue
+            if ch not in seen:
+                normalized.append(ch)
+                seen.add(ch)
+        settings.MONITORING_CHANNELS = normalized
+        if self._authorized:
+            await self.refresh_handlers(normalized)
+
+    async def join_channel(self, identifier: str) -> bool:
+        """Подписаться на канал/чат по @username или ссылке t.me/.. или инвайт-ссылке (+hash)."""
+        if not self._authorized:
+            logger.error("Cannot join channel: client not authorized")
+            return False
+        ident = (identifier or '').strip()
+        if not ident:
+            return False
+        try:
+            # t.me/ links handling
+            if ident.startswith('https://t.me/') or ident.startswith('http://t.me/'):
+                tail = ident.split('/', 3)[-1]
+                # Invite links like https://t.me/+abcdef
+                if tail.startswith('+'):
+                    invite_hash = tail[1:]
+                    await self.client(ImportChatInviteRequest(invite_hash))
+                    return True
+                # public username
+                username = tail.split('?')[0]
+                if username:
+                    if username.startswith('+'):
+                        # rare case: t.me/+hash (already handled above), fallthrough
+                        invite_hash = username[1:]
+                        await self.client(ImportChatInviteRequest(invite_hash))
+                        return True
+                    ent = await self.client.get_entity(username)
+                    await self.client(JoinChannelRequest(ent))
+                    return True
+                return False
+            # @username
+            uname = ident[1:] if ident.startswith('@') else ident
+            if uname:
+                ent = await self.client.get_entity(uname)
+                await self.client(JoinChannelRequest(ent))
+                return True
+            return False
+        except Exception as e:
+            logger.warning("Failed to join '%s': %s", identifier, e)
+            return False
+
+    async def leave_channel(self, identifier: str) -> bool:
+        """Отписаться от канала/чата по @username или ссылке t.me/..."""
+        if not self._authorized:
+            logger.error("Cannot leave channel: client not authorized")
+            return False
+        ident = (identifier or '').strip()
+        if not ident:
+            return False
+        try:
+            # For t.me invite links, we cannot compute back channel easily; try resolving entity when possible
+            if ident.startswith('https://t.me/') or ident.startswith('http://t.me/'):
+                tail = ident.split('/', 3)[-1]
+                if tail.startswith('+'):
+                    # no username available; cannot resolve reliably, ignore
+                    return True  # consider no-op
+                username = tail.split('?')[0]
+                ent = await self.client.get_entity(username)
+                await self.client(LeaveChannelRequest(ent))
+                return True
+            uname = ident[1:] if ident.startswith('@') else ident
+            ent = await self.client.get_entity(uname)
+            await self.client(LeaveChannelRequest(ent))
+            return True
+        except Exception as e:
+            logger.warning("Failed to leave '%s': %s", identifier, e)
+            return False
+
+    def set_quiet_mode(self, on: bool) -> None:
+        self._quiet_mode = bool(on)
+
+    def set_quiet_schedule(self, schedule: Optional[str]) -> None:
+        # Ожидаем формат HH:MM-HH:MM или None
+        self._quiet_schedule = schedule.strip() if schedule else None
+
+    def _is_in_quiet_schedule(self) -> bool:
+        if not self._quiet_schedule:
+            return False
+        try:
+            import datetime as _dt
+            rng = self._quiet_schedule
+            if '-' not in rng:
+                return False
+            start_s, end_s = [p.strip() for p in rng.split('-', 1)]
+            sh, sm = [int(x) for x in start_s.split(':', 1)]
+            eh, em = [int(x) for x in end_s.split(':', 1)]
+            now = _dt.datetime.now().time()
+            start_t = _dt.time(sh, sm)
+            end_t = _dt.time(eh, em)
+            if start_t <= end_t:
+                # обычный интервал в пределах суток
+                return start_t <= now <= end_t
+            else:
+                # интервал через полночь
+                return now >= start_t or now <= end_t
+        except Exception:
+            logger.warning("Invalid quiet schedule format: %s", self._quiet_schedule)
+            return False
+
+    def is_quiet_now(self) -> bool:
+        return self._quiet_mode or self._is_in_quiet_schedule()
 
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:
         try:
@@ -437,6 +596,13 @@ class TelegramMonitor:
             "disable_web_page_preview": True,
             "reply_markup": reply_markup,
         }
+
+        # Тихие часы: отправляем без уведомлений
+        try:
+            if self.is_quiet_now():
+                body["disable_notification"] = True
+        except Exception:
+            pass
 
         api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
 

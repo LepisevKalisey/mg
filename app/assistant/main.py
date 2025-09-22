@@ -20,7 +20,7 @@ from .config import settings
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 logger = logging.getLogger("assistant.main")
 
-app = FastAPI(title="MediaGenerator Assistant", version="0.2.0")
+app = FastAPI(title="MediaGenerator Assistant", version="0.3.0")
 
 
 @app.on_event("startup")
@@ -28,6 +28,8 @@ async def on_startup():
     # Убедимся, что директории существуют
     os.makedirs(settings.PENDING_DIR, exist_ok=True)
     os.makedirs(settings.APPROVED_DIR, exist_ok=True)
+    # Директория конфигурации агрегатора
+    os.makedirs(os.path.dirname(settings.AGGREGATOR_CONFIG_PATH), exist_ok=True)
     logger.info("Assistant service started (webhook mode)")
 
     # Автоконфигурация вебхука
@@ -47,7 +49,7 @@ async def on_startup():
             "url": target_url,
             # Небольшие ограничения для снижения нагрузки
             "max_connections": 20,
-            "allowed_updates": ["callback_query"],
+            "allowed_updates": ["message", "callback_query"],
         }
         if settings.WEBHOOK_SECRET:
             body["secret_token"] = settings.WEBHOOK_SECRET
@@ -127,6 +129,18 @@ def _tg_api(method: str, body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _send_message(chat_id: int, text: str, reply_to_message_id: Optional[int] = None) -> None:
+    body: Dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_to_message_id:
+        body["reply_to_message_id"] = reply_to_message_id
+        body["allow_sending_without_reply"] = True
+    _tg_api("sendMessage", body)
+
+
 def _answer_callback(callback_id: Optional[str], text: str) -> None:
     if not callback_id:
         return
@@ -182,6 +196,261 @@ def _reject(filename: str) -> bool:
         return False
 
 
+# --- HTTP helper для REST сервисов ---
+
+def _rest_call(method: str, url: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Optional[Dict[str, Any]]:
+    try:
+        data = None
+        headers = {"Content-Type": "application/json"}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+        req = urlrequest.Request(url, data=data, headers=headers, method=method.upper())
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            txt = resp.read().decode("utf-8")
+            return json.loads(txt)
+    except HTTPError as he:
+        try:
+            err_body = he.read().decode("utf-8")
+        except Exception:
+            err_body = str(he)
+        logger.warning(f"REST {method} {url} failed: {he.code} {err_body}")
+    except Exception:
+        logger.warning(f"REST {method} {url} failed", exc_info=True)
+    return None
+
+
+# --- Конфиг агрегатора ---
+
+def _load_agg_config() -> Dict[str, Any]:
+    try:
+        if os.path.isfile(settings.AGGREGATOR_CONFIG_PATH):
+            with open(settings.AGGREGATOR_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        logger.exception("Failed to read aggregator config")
+    return {}
+
+
+def _save_agg_config(cfg: Dict[str, Any]) -> bool:
+    try:
+        os.makedirs(os.path.dirname(settings.AGGREGATOR_CONFIG_PATH), exist_ok=True)
+        with open(settings.AGGREGATOR_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        logger.exception("Failed to write aggregator config")
+        return False
+
+
+# --- Команды бота ---
+
+def _help_text() -> str:
+    return (
+        "Доступные команды:\n"
+        "\n"
+        "Источники (Collector):\n"
+        "/add_source <@channel|t.me/link> — добавить источник\n"
+        "/remove_source <@channel|t.me/link> — удалить источник\n"
+        "/list_sources — показать текущий список\n"
+        "\n"
+        "Тихие часы (уведомления редакторам без звука):\n"
+        "/quiet on|off — включить/выключить тихий режим\n"
+        "/quiet_schedule <HH:MM-HH:MM|off> — задать интервал или отключить\n"
+        "\n"
+        "Дайджест (Aggregator):\n"
+        "/digest_time <HH:MM> — время ежедневной публикации\n"
+        "/digest_limit <N> — лимит постов в выпуске\n"
+        "/publish_now — принудительно опубликовать сейчас\n"
+        "\n"
+        "/status — статус микросервисов\n"
+        "/help — эта справка\n"
+    )
+
+
+def _validate_hhmm(s: str) -> bool:
+    parts = s.split(":")
+    if len(parts) != 2:
+        return False
+    try:
+        hh = int(parts[0])
+        mm = int(parts[1])
+        return 0 <= hh <= 23 and 0 <= mm <= 59
+    except Exception:
+        return False
+
+
+def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
+    t = (text or "").strip()
+    if not t.startswith("/"):
+        return
+    cmd, _, args = t.partition(" ")
+    cmd = cmd.lower()
+    args = args.strip()
+
+    # Ограничим доступ по ADMIN_CHAT_ID, если задан
+    if settings.ADMIN_CHAT_ID is not None and chat_id != settings.ADMIN_CHAT_ID:
+        _send_message(chat_id, "Эта команда доступна только администратору.")
+        return
+
+    # Маршрутизация команд
+    if cmd in ("/help", "/start"):
+        _send_message(chat_id, _help_text(), reply_to_message_id=message_id)
+        return
+
+    if cmd == "/add_source":
+        if not args:
+            _send_message(chat_id, "Использование: /add_source <@channel|t.me/link>")
+            return
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/channels/add"
+        resp = _rest_call("POST", url, {"channel": args})
+        if not resp:
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        if resp.get("ok") and resp.get("added"):
+            _send_message(chat_id, f"Источник добавлен: {args}")
+        elif resp.get("reason") == "duplicate":
+            _send_message(chat_id, f"Источник уже существует: {args}")
+        else:
+            _send_message(chat_id, f"Не удалось добавить источник: {args}")
+        return
+
+    if cmd == "/remove_source":
+        if not args:
+            _send_message(chat_id, "Использование: /remove_source <@channel|t.me/link>")
+            return
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/channels/remove"
+        resp = _rest_call("POST", url, {"channel": args})
+        if not resp:
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        if resp.get("ok") and resp.get("removed"):
+            _send_message(chat_id, f"Источник удалён: {args}")
+        elif resp.get("reason") == "not_found":
+            _send_message(chat_id, f"Источник не найден: {args}")
+        else:
+            _send_message(chat_id, f"Не удалось удалить источник: {args}")
+        return
+
+    if cmd == "/list_sources":
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/channels"
+        resp = _rest_call("GET", url)
+        if not resp or not resp.get("ok"):
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        chs = resp.get("channels") or []
+        if not chs:
+            _send_message(chat_id, "Список источников пуст")
+        else:
+            txt = "Текущие источники (" + str(len(chs)) + "):\n" + "\n".join(chs)
+            _send_message(chat_id, txt)
+        return
+
+    if cmd == "/quiet":
+        val = args.lower()
+        if val not in ("on", "off"):
+            _send_message(chat_id, "Использование: /quiet on|off")
+            return
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/quiet"
+        resp = _rest_call("POST", url, {"on": val == "on"})
+        if not resp or not resp.get("ok"):
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        state = resp.get("quiet")
+        _send_message(chat_id, f"Тихий режим: {'включен' if state else 'выключен'}")
+        return
+
+    if cmd == "/quiet_schedule":
+        if not args:
+            _send_message(chat_id, "Использование: /quiet_schedule <HH:MM-HH:MM|off>")
+            return
+        rng = args if args.lower() != "off" else ""
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/quiet/schedule"
+        resp = _rest_call("POST", url, {"range": rng})
+        if not resp or not resp.get("ok"):
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        r = resp.get("range")
+        if r:
+            _send_message(chat_id, f"Тихие часы установлены: {r}")
+        else:
+            _send_message(chat_id, "Тихие часы отключены")
+        return
+
+    if cmd == "/digest_time":
+        if not args or not _validate_hhmm(args):
+            _send_message(chat_id, "Использование: /digest_time <HH:MM>")
+            return
+        cfg = _load_agg_config()
+        cfg["schedule"] = args
+        if _save_agg_config(cfg):
+            _send_message(chat_id, f"Время публикации установлено: {args}")
+        else:
+            _send_message(chat_id, "Не удалось сохранить конфигурацию агрегатора")
+        return
+
+    if cmd == "/digest_limit":
+        try:
+            n = int(args)
+        except Exception:
+            n = 0
+        if n <= 0:
+            _send_message(chat_id, "Использование: /digest_limit <N>")
+            return
+        cfg = _load_agg_config()
+        cfg["limit"] = n
+        if _save_agg_config(cfg):
+            _send_message(chat_id, f"Лимит постов установлен: {n}")
+        else:
+            _send_message(chat_id, "Не удалось сохранить конфигурацию агрегатора")
+        return
+
+    if cmd == "/publish_now":
+        if not settings.AGGREGATOR_URL:
+            _send_message(chat_id, "Aggregator URL не задан, операция недоступна")
+            return
+        url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
+        resp = _rest_call("POST", url, {})
+        if resp and resp.get("ok"):
+            _send_message(chat_id, "Публикация запущена")
+        else:
+            _send_message(chat_id, "Не удалось инициировать публикацию")
+        return
+
+    if cmd == "/status":
+        # assistant
+        self_status = {"service": "assistant", "status": "ok"}
+        # collector
+        col_status = None
+        try:
+            col_status = _rest_call("GET", settings.COLLECTOR_URL.rstrip("/") + "/health")
+        except Exception:
+            col_status = None
+        # aggregator
+        agg_status = None
+        if settings.AGGREGATOR_URL:
+            try:
+                agg_status = _rest_call("GET", settings.AGGREGATOR_URL.rstrip("/") + "/health")
+            except Exception:
+                agg_status = None
+        lines = []
+        def fmt(svc: Optional[Dict[str, Any]], name: str) -> str:
+            if not svc:
+                return f"{name}: недоступен"
+            st = svc.get("status") or "unknown"
+            return f"{name}: {st}"
+        lines.append(fmt(self_status, "assistant"))
+        lines.append(fmt(col_status, "collector"))
+        if settings.AGGREGATOR_URL:
+            lines.append(fmt(agg_status, "aggregator"))
+        _send_message(chat_id, "\n".join(lines))
+        return
+
+    # Неизвестная команда
+    _send_message(chat_id, "Неизвестная команда. Введите /help")
+
+
 # --- Webhook endpoint ---
 @app.get("/telegram/webhook")
 async def telegram_webhook_get():
@@ -210,37 +479,49 @@ async def telegram_webhook(request: Request):
         logger.exception("Invalid JSON in webhook request")
         return JSONResponse({"ok": True})
 
+    # 1) callback_query (кнопки модерации)
     cbq = upd.get("callback_query")
-    if not cbq:
-        # Нас интересуют только callback_query; остальное игнорируем молча
+    if cbq:
+        data = (cbq.get("data") or "").strip()
+        message = cbq.get("message") or {}
+        chat_id = ((message.get("chat") or {}).get("id"))
+        msg_id = message.get("message_id")
+        cb_id = cbq.get("id")
+
+        logger.info(f"Callback received: data={data}, chat_id={chat_id}, message_id={msg_id}")
+
+        result_text = ""
+        if data.startswith("approve:"):
+            filename = os.path.basename(data.split(":", 1)[1])
+            ok = _approve(filename)
+            result_text = "✅ Одобрено" if ok else "Не найден файл"
+        elif data.startswith("reject:"):
+            filename = os.path.basename(data.split(":", 1)[1])
+            ok = _reject(filename)
+            result_text = "❌ Отклонено" if ok else "Не найден файл"
+        else:
+            result_text = "Неверная команда"
+
+        # Ответим нажатию
+        _answer_callback(cb_id, result_text)
+
+        # По требованию: удаляем сообщение после нажатия
+        _delete_message(chat_id, msg_id)
+        # На случай отсутствия прав на удаление — уберём клавиатуру
+        _clear_markup(chat_id, msg_id)
+
         return JSONResponse({"ok": True})
 
-    data = (cbq.get("data") or "").strip()
-    message = cbq.get("message") or {}
-    chat_id = ((message.get("chat") or {}).get("id"))
-    msg_id = message.get("message_id")
-    cb_id = cbq.get("id")
+    # 2) text message с командами
+    msg = upd.get("message") or {}
+    if msg:
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        msg_id = msg.get("message_id")
+        text = (msg.get("text") or "").strip()
+        if text.startswith("/"):
+            _handle_command(chat_id, msg_id, text)
+        return JSONResponse({"ok": True})
 
-    logger.info(f"Callback received: data={data}, chat_id={chat_id}, message_id={msg_id}")
-
-    result_text = ""
-    if data.startswith("approve:"):
-        filename = os.path.basename(data.split(":", 1)[1])
-        ok = _approve(filename)
-        result_text = "✅ Одобрено" if ok else "Не найден файл"
-    elif data.startswith("reject:"):
-        filename = os.path.basename(data.split(":", 1)[1])
-        ok = _reject(filename)
-        result_text = "❌ Отклонено" if ok else "Не найден файл"
-    else:
-        result_text = "Неверная команда"
-
-    # Ответим нажатию
-    _answer_callback(cb_id, result_text)
-
-    # По требованию: удаляем сообщение после нажатия
-    _delete_message(chat_id, msg_id)
-    # На случай отсутствия прав на удаление — уберём клавиатуру
-    _clear_markup(chat_id, msg_id)
-
+    # Остальные типы апдейтов игнорируем
     return JSONResponse({"ok": True})

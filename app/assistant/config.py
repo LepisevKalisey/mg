@@ -34,5 +34,24 @@ class Settings:
         self.SERVICE_URL = _get_env("SERVICE_URL_ASSISTANT")
         self.WEBHOOK_SECRET = _get_env("TELEGRAM_WEBHOOK_SECRET")
 
+        # Управление сервисами
+        # URL Collector API (например, http://collector:8001)
+        self.COLLECTOR_URL = _get_env("COLLECTOR_URL", "http://localhost:8001")
+        # URL Aggregator API (опционально, если сервис существует)
+        self.AGGREGATOR_URL = _get_env("AGGREGATOR_URL")
+        # Ограничение обработки команд ботом по чату-администратору (опционально)
+        admin_chat = _get_env("ADMIN_CHAT_ID")
+        self.ADMIN_CHAT_ID: Optional[int] = None
+        if admin_chat:
+            try:
+                self.ADMIN_CHAT_ID = int(admin_chat)
+            except Exception:
+                # Оставим None при некорректном значении
+                self.ADMIN_CHAT_ID = None
+
+        # Пути для конфигурации агрегатора (файловая конфигурация)
+        self.AGGREGATOR_DIR = os.path.join(self.DATA_DIR, "aggregator")
+        self.AGGREGATOR_CONFIG_PATH = os.path.join(self.AGGREGATOR_DIR, "config.json")
+
 
 settings = Settings()
