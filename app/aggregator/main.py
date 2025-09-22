@@ -122,19 +122,26 @@ def run_aggregation(limit: Optional[int] = None):
 
     out_name = "summary.txt"
     out_path = os.path.join(settings.OUTPUT_DIR, out_name)
+    wrote_ok = False
     try:
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(summary)
+        wrote_ok = True
+        logger.info(f"Summary written: path={out_path} len={len(summary)}")
     except Exception:
         logger.exception("Failed to write summary to %s", out_path)
 
     removed = []
-    for it in items:
-        try:
-            os.remove(it["path"]) 
-            removed.append(os.path.basename(it["path"]))
-        except Exception:
-            logger.exception("Failed to remove %s", it["path"]) 
+    if wrote_ok:
+        for it in items:
+            try:
+                os.remove(it["path"]) 
+                removed.append(os.path.basename(it["path"]))
+            except Exception:
+                logger.exception("Failed to remove %s", it["path"]) 
+        logger.info(f"Approved removed: count={len(removed)}")
+    else:
+        logger.warning("Summary not written; approved are kept")
 
     return JSONResponse({"ok": True, "result": "ok", "output": out_path, "removed": removed})
 
@@ -153,19 +160,14 @@ def publish_now(limit: Optional[int] = None):
         return JSONResponse({"ok": False, "result": "gemini_failed", "published": False, "error": "empty_summary"})
 
     out_path = os.path.join(settings.OUTPUT_DIR, "summary.txt")
+    wrote_ok = False
     try:
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(summary)
+        wrote_ok = True
+        logger.info(f"Summary written: path={out_path} len={len(summary)}")
     except Exception:
         logger.exception("Failed to write summary to %s", out_path)
-
-    removed = []
-    for it in items:
-        try:
-            os.remove(it["path"]) 
-            removed.append(os.path.basename(it["path"]))
-        except Exception:
-            logger.exception("Failed to remove %s", it["path"]) 
 
     published = False
     if settings.BOT_TOKEN and settings.TARGET_CHANNEL_ID:
@@ -192,5 +194,17 @@ def publish_now(limit: Optional[int] = None):
             logger.error(f"Bot API URLError: {ue}")
         except Exception as e:
             logger.exception(f"Bot API request failed: {e}")
+
+    removed = []
+    if wrote_ok and published:
+        for it in items:
+            try:
+                os.remove(it["path"]) 
+                removed.append(os.path.basename(it["path"]))
+            except Exception:
+                logger.exception("Failed to remove %s", it["path"]) 
+        logger.info(f"Approved removed: count={len(removed)}")
+    else:
+        logger.warning("Publish failed or summary not written; approved are kept")
 
     return JSONResponse({"ok": True, "result": "ok", "output": out_path, "removed": removed, "published": published})

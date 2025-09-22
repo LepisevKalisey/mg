@@ -3,17 +3,17 @@ services:
     build:
       context: .
     command: uvicorn app.aggregator.main:app --host 0.0.0.0 --port 8002
-    restart: unless-stopped
+    restart: unless-stopped```
     environment:
       - DATA_DIR=/app/data
       - AGGREGATOR_HOST=0.0.0.0
       - AGGREGATOR_PORT=8002
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-dummy}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - BOT_TOKEN=${BOT_TOKEN}
       - TARGET_CHANNEL_ID=${TARGET_CHANNEL_ID}
       - AGG_BATCH_LIMIT=50
       - AGG_LANG=ru
-    volumes:
+```    volumes:
       - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
