@@ -28,6 +28,13 @@ class Settings:
 
         # Telegram Bot
         self.BOT_TOKEN = _get_env("BOT_TOKEN", required=True)
+        # Админ-чат для ограничений команд и уведомлений
+        self.ADMIN_CHAT_ID = _get_env("ADMIN_CHAT_ID")
+        if self.ADMIN_CHAT_ID:
+            try:
+                self.ADMIN_CHAT_ID = int(self.ADMIN_CHAT_ID)
+            except Exception:
+                pass
         # Публичный URL сервиса для вебхука и опциональный секрет
         self.SERVICE_URL = _get_env("SERVICE_URL_ASSISTANT")
         self.WEBHOOK_SECRET = _get_env("TELEGRAM_WEBHOOK_SECRET")
