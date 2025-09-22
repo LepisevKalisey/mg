@@ -12,6 +12,7 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from .config import settings
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 logger = logging.getLogger("aggregator.main")
@@ -58,14 +59,18 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
 
 
 def _use_gemini(prompt: str) -> str:
-    # Простой HTTP-клиент к Gemini REST (вставьте свой endpoint/библиотеку при необходимости)
-    # По умолчанию попробуем использовать официальный SDK, если он установлен, иначе заглушку.
     try:
         import google.generativeai as genai  # type: ignore
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model_name = "gemini-1.5-flash"
+        start = time.perf_counter()
+        logger.info(f"Gemini request: model={model_name} prompt_len={len(prompt)}")
+        model = genai.GenerativeModel(model_name)
         resp = model.generate_content(prompt)
-        return (resp.text or "").strip()
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        text = (resp.text or "").strip()
+        logger.info(f"Gemini response: ok={bool(text)} text_len={len(text)} duration_ms={duration_ms}")
+        return text
     except Exception as e:
         logger.exception("Gemini call failed: %s", e)
         return ""
@@ -108,13 +113,13 @@ def run_aggregation(limit: Optional[int] = None):
     if not items:
         return JSONResponse({"ok": True, "result": "empty", "summary": ""})
 
+    logger.info(f"Run aggregation: items={len(items)}")
     prompt = _compose_prompt(items, settings.SUMMARY_LANGUAGE)
     summary = _use_gemini(prompt)
     if not summary:
-        logger.warning("Gemini summary empty, using fallback")
-        summary = _fallback_summary(items, settings.SUMMARY_LANGUAGE)
+        logger.error("Gemini returned empty summary; aborting aggregation")
+        return JSONResponse({"ok": False, "result": "gemini_failed", "error": "empty_summary"})
 
-    # Сохраним дайджест в файл
     out_name = "summary.txt"
     out_path = os.path.join(settings.OUTPUT_DIR, out_name)
     try:
@@ -123,7 +128,6 @@ def run_aggregation(limit: Optional[int] = None):
     except Exception:
         logger.exception("Failed to write summary to %s", out_path)
 
-    # По требованиям — удаляем обработанные файлы
     removed = []
     for it in items:
         try:
@@ -141,13 +145,13 @@ def publish_now(limit: Optional[int] = None):
     if not items:
         return JSONResponse({"ok": True, "result": "empty", "published": False})
 
+    logger.info(f"Publish now: items={len(items)}")
     prompt = _compose_prompt(items, settings.SUMMARY_LANGUAGE)
     summary = _use_gemini(prompt)
     if not summary:
-        logger.warning("Gemini summary empty, using fallback")
-        summary = _fallback_summary(items, settings.SUMMARY_LANGUAGE)
+        logger.error("Gemini returned empty summary; aborting publish")
+        return JSONResponse({"ok": False, "result": "gemini_failed", "published": False, "error": "empty_summary"})
 
-    # Save summary
     out_path = os.path.join(settings.OUTPUT_DIR, "summary.txt")
     try:
         with open(out_path, "w", encoding="utf-8") as f:
@@ -155,7 +159,6 @@ def publish_now(limit: Optional[int] = None):
     except Exception:
         logger.exception("Failed to write summary to %s", out_path)
 
-    # Remove processed approved files
     removed = []
     for it in items:
         try:
@@ -167,6 +170,7 @@ def publish_now(limit: Optional[int] = None):
     published = False
     if settings.BOT_TOKEN and settings.TARGET_CHANNEL_ID:
         try:
+            logger.info(f"Publishing to Telegram: chat_id={settings.TARGET_CHANNEL_ID} text_len={len(summary)}")
             api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
             body = {
                 "chat_id": settings.TARGET_CHANNEL_ID,
