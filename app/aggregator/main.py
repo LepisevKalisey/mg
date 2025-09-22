@@ -5,6 +5,7 @@ import logging
 +import re
 +import html
 from typing import List, Dict, Any, Optional
++from typing import List, Dict, Any, Optional, Match
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -75,8 +76,8 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
 +    Поддерживаем только http/https ссылки. Эмодзи и кириллица сохраняются.
 +    """
 +    # 1) Заменим Markdown-ссылки на плейсхолдеры
-+    placeholders: list[str] = []
-+    def repl(m: re.Match[str]) -> str:
++    placeholders: List[str] = []
++    def repl(m: Match) -> str:
 +        title = m.group(1)
 +        url = m.group(2)
 +        anchor = f'<a href="{html.escape(url, quote=True)}">{html.escape(title)}</a>'
@@ -220,7 +221,7 @@ def publish_now(limit: Optional[int] = None):
     out_path = os.path.join(settings.OUTPUT_DIR, "summary.txt")
     wrote_ok = False
     try:
-        with open(out_path, "w", encoding="utf-8") as f:
+        with open(out_path, "w", encoding="utf-8-sig") as f:
             f.write(summary)
         wrote_ok = True
         logger.info(f"Summary written: path={out_path} len={len(summary)}")
