@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     command: ["uvicorn", "app.assistant.main:app", "--host", "0.0.0.0", "--port", "8003"]
     restart: unless-stopped
+    environment:
+      - COLLECTOR_URL=http://collector:8001
     volumes:
       - /home/extdrv/mg/:/app/data
     ports:
@@ -15,3 +17,10 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+    networks:
+      - mg_net
+
+networks:
+  mg_net:
+    external: true
+    name: mg_net

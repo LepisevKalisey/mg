@@ -15,3 +15,10 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+    networks:
+      - mg_net
+
+networks:
+  mg_net:
+    external: true
+    name: mg_net
