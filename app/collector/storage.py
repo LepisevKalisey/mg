@@ -11,13 +11,17 @@ def ensure_dirs(*paths: str) -> None:
 
 
 def _sanitize_filename(name: str) -> str:
-    # Уберём недопустимые символы для файловых имён Windows/Unix
-    name = re.sub(r'[\\/:*?"<>|]', '_', name)
+    # Разрешаем Юникод, включая кириллицу; заменяем только недопустимые для файловых имён символы
+    # Запрещенные символы Windows/Unix: \ / : * ? " < > |
+    name = re.sub(r'[\\/:*?"<>|]+', '_', name)
+    # Заменим последовательности пробелов и управляющих символов на один пробел
+    name = re.sub(r'\s+', ' ', name)
+    # Удалим не-печатаемые символы (категория C в Юникоде)
+    name = ''.join(ch for ch in name if ch.isprintable())
     # Обрежем пробелы в конце/начале и приведём к разумной длине
     name = name.strip()
     if len(name) > 80:
         name = name[:80]
-    # Запасной вариант для пустого имени
     return name or "unknown"
 
 

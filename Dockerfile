@@ -22,5 +22,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8001 8003
 
-# Запускаем API
+# Запуск командой из docker-compose; по умолчанию collector, но может быть переопределено
 CMD ["uvicorn", "app.collector.main:app", "--host", "0.0.0.0", "--port", "8001"]
