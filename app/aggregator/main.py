@@ -71,10 +71,31 @@ def _use_gemini(prompt: str) -> str:
         return ""
 
 
+def _fallback_summary(items: List[Dict[str, Any]], lang: str) -> str:
+    # Простой фолбэк без ML: собираем список пунктов из текстов
+    # Формат: - [Канал] первая строка текста… (Источник: @username/ID)
+    lines: List[str] = []
+    for it in items:
+        p = it["payload"]
+        title = p.get("channel_title") or p.get("channel_name") or "Канал"
+        username = p.get("channel_username")
+        msg_id = p.get("message_id")
+        url = f"https://t.me/{username}/{msg_id}" if username and msg_id else ""
+        text = p.get("text") or (p.get("media") or {}).get("caption") or ""
+        first_line = (text or "").splitlines()[0].strip()
+        if len(first_line) > 200:
+            first_line = first_line[:200] + "…"
+        src = f"Источник: {title} — {url}" if url else f"Источник: {title}"
+        lines.append(f"- [{title}] {first_line} ({src})")
+    header = "Дайджест (фолбэк):"
+    return "\n".join([header] + lines)
+
+
 @app.get("/health")
 def health():
     return JSONResponse({
         "ok": True,
+        "status": "ok",
         "service": "aggregator",
         "approved_dir": settings.APPROVED_DIR,
         "output_dir": settings.OUTPUT_DIR,
@@ -90,7 +111,8 @@ def run_aggregation(limit: Optional[int] = None):
     prompt = _compose_prompt(items, settings.SUMMARY_LANGUAGE)
     summary = _use_gemini(prompt)
     if not summary:
-        return JSONResponse({"ok": False, "error": "gemini_failed"}, status_code=500)
+        logger.warning("Gemini summary empty, using fallback")
+        summary = _fallback_summary(items, settings.SUMMARY_LANGUAGE)
 
     # Сохраним дайджест в файл
     out_name = "summary.txt"
@@ -122,7 +144,8 @@ def publish_now(limit: Optional[int] = None):
     prompt = _compose_prompt(items, settings.SUMMARY_LANGUAGE)
     summary = _use_gemini(prompt)
     if not summary:
-        return JSONResponse({"ok": False, "error": "gemini_failed"}, status_code=500)
+        logger.warning("Gemini summary empty, using fallback")
+        summary = _fallback_summary(items, settings.SUMMARY_LANGUAGE)
 
     # Save summary
     out_path = os.path.join(settings.OUTPUT_DIR, "summary.txt")
