@@ -2,12 +2,30 @@ import asyncio
 import logging
 import os
 import json
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 from urllib import request as urlrequest
 from urllib.error import URLError, HTTPError
 
 from telethon import TelegramClient, events
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.types import (
+    MessageEntityBold,
+    MessageEntityItalic,
+    MessageEntityUnderline,
+    MessageEntityStrike,
+    MessageEntityCode,
+    MessageEntityPre,
+    MessageEntityTextUrl,
+    MessageEntityUrl,
+    MessageEntityMention,
+    MessageEntityHashtag,
+    MessageEntityCashtag,
+    MessageEntityBotCommand,
+    MessageEntityEmail,
+    MessageEntityPhone,
+    MessageEntitySpoiler,
+    MessageEntityBlockquote,
+)
 
 from .config import settings
 from .storage import save_pending_message
@@ -78,6 +96,8 @@ class TelegramMonitor:
             logger.warning("Channels list is empty. Skipping event handler registration.")
             return
         self.client.add_event_handler(self._on_new_message, events.NewMessage(chats=chats_filter))
+        # Отдельный обработчик альбомов (media group) — будет вызван единоразово на всю группу
+        self.client.add_event_handler(self._on_new_album, events.Album(chats=chats_filter))
 
         # Запускаем run_until_disconnected в фоне
         self._task = asyncio.create_task(self._run_client())
@@ -114,6 +134,9 @@ class TelegramMonitor:
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:
         try:
             msg: Message = event.message
+            # Если это часть альбома (media group), обработаем в _on_new_album и здесь игнорируем
+            if getattr(msg, "grouped_id", None):
+                return
 
             # Берем чат (канал)
             chat = await event.get_chat()
@@ -183,13 +206,183 @@ class TelegramMonitor:
             path = save_pending_message(settings.PENDING_DIR, payload)
             logger.info(f"Saved pending message: {path}")
 
-            # Отправим уведомление редакторам с кнопками
-            await self._send_to_editors(payload, path)
+            # Отправим уведомление редакторам с кнопками (только текст, с сохранением форматирования)
+            await self._send_to_editors(payload, path, source_message=msg)
 
         except Exception as e:
             logger.exception(f"Failed to process message: {e}")
 
+    async def _on_new_album(self, event: events.Album.Event) -> None:
+        """Обрабатываем альбом (media group) как единый пост: пересылаем только текстовую часть (капшен),
+        сохраняя форматирование, без дублирования по каждому медиа."""
+        try:
+            msgs: List[Message] = list(event.messages) if hasattr(event, "messages") else []
+            if not msgs:
+                return
+
+            # Берем чат (канал)
+            chat = await event.get_chat()
+            channel_id = getattr(chat, "id", None)
+            channel_username = getattr(chat, "username", None)
+            channel_title = getattr(chat, "title", None) or channel_username or "unknown"
+
+            # Выберем "основное" сообщение для текста (обычно в одном из элементов альбома есть caption)
+            primary = None
+            non_empty = [m for m in msgs if (m.message or "").strip()]
+            if non_empty:
+                primary = max(non_empty, key=lambda m: len(m.message))
+            else:
+                primary = msgs[0]
+
+            msg = primary
+
+            # Метаданные для сохранения
+            views = getattr(msg, "views", None)
+            forwards = getattr(msg, "forwards", None)
+            reactions = None
+            if getattr(msg, "reactions", None):
+                try:
+                    reactions = [
+                        {"emoji": getattr(c.reaction, "emoticon", None), "count": c.count}
+                        for c in msg.reactions.results
+                    ]
+                except Exception:
+                    reactions = None
+
+            author = {}
+            if msg.sender:
+                sender = await msg.get_sender()
+                author = {
+                    "id": getattr(sender, "id", None),
+                    "username": getattr(sender, "username", None),
+                    "first_name": getattr(sender, "first_name", None),
+                    "last_name": getattr(sender, "last_name", None),
+                }
+
+            payload: Dict[str, Any] = {
+                "id": f"{channel_id}_{msg.id}",
+                "channel_id": str(channel_id),
+                "channel_name": str(channel_title),
+                "channel_username": channel_username,
+                "channel_title": channel_title,
+                "message_id": msg.id,
+                "text": msg.message,
+                "media": None,  # альбом не пересылаем, сохраняем только текст
+                "author": author,
+                "timestamp": msg.date.isoformat() if msg.date else None,
+                "metadata": {
+                    "views": views,
+                    "forwards": forwards,
+                    "reactions": reactions,
+                },
+                "status": "pending",
+                "moderation": None,
+            }
+
+            path = save_pending_message(settings.PENDING_DIR, payload)
+            logger.info(f"Saved pending album message: {path}")
+
+            await self._send_to_editors(payload, path, source_message=msg)
+
+        except Exception as e:
+            logger.exception(f"Failed to process album: {e}")
+
+    # ---- Formatting helpers ----
+    @staticmethod
+    def _utf16_len(s: str) -> int:
+        # Считаем длину строки в UTF-16 code units (как требует Bot API для offsets)
+        total = 0
+        for ch in s or "":
+            o = ord(ch)
+            total += 2 if o > 0xFFFF else 1
+        return total
+
+    def _map_entity(self, ent: Any) -> Optional[Dict[str, Any]]:
+        # Маппинг Telethon entity -> Bot API entity
+        if isinstance(ent, MessageEntityBold):
+            return {"type": "bold", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityItalic):
+            return {"type": "italic", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityUnderline):
+            return {"type": "underline", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityStrike):
+            return {"type": "strikethrough", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityCode):
+            return {"type": "code", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityPre):
+            d = {"type": "pre", "offset": ent.offset, "length": ent.length}
+            lang = getattr(ent, "language", None)
+            if lang:
+                d["language"] = lang
+            return d
+        if isinstance(ent, MessageEntityTextUrl):
+            return {"type": "text_link", "offset": ent.offset, "length": ent.length, "url": ent.url}
+        if isinstance(ent, MessageEntityUrl):
+            return {"type": "url", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityMention):
+            return {"type": "mention", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityHashtag):
+            return {"type": "hashtag", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityCashtag):
+            return {"type": "cashtag", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityBotCommand):
+            return {"type": "bot_command", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityEmail):
+            return {"type": "email", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityPhone):
+            return {"type": "phone_number", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntitySpoiler):
+            return {"type": "spoiler", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityBlockquote):
+            return {"type": "blockquote", "offset": ent.offset, "length": ent.length}
+        # Прочие не маппим
+        return None
+
+    def _extract_text_and_entities(self, msg: Message) -> Tuple[str, List[Dict[str, Any]]]:
+        text = msg.message or ""
+        entities = getattr(msg, "entities", None) or []
+        bot_entities: List[Dict[str, Any]] = []
+        for ent in entities:
+            mapped = self._map_entity(ent)
+            if mapped:
+                bot_entities.append(mapped)
+        return text, bot_entities
+
+    def _compose_title_and_text(self, payload: Dict[str, Any], text: str, entities: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+        title = payload.get("channel_title") or payload.get("channel_name") or "Канал"
+        username = payload.get("channel_username")
+        msg_id = payload.get("message_id")
+        post_url = f"https://t.me/{username}/{msg_id}" if username else None
+
+        # Базовая строка — название канала (как ссылка, если возможно)
+        full_text = title
+        out_entities: List[Dict[str, Any]] = []
+        title_utf16 = self._utf16_len(title)
+        if post_url:
+            out_entities.append({
+                "type": "text_link",
+                "offset": 0,
+                "length": title_utf16,
+                "url": post_url,
+            })
+
+        if text:
+            # Добавим пустую строку и сам текст
+            prefix = f"{title}\n\n"
+            full_text = prefix + text
+            shift = self._utf16_len(prefix)
+            for e in entities:
+                e2 = dict(e)
+                e2["offset"] = e2["offset"] + shift
+                out_entities.append(e2)
+        else:
+            # Только заголовок
+            full_text = title if not username else title  # уже учли ссылку через entity выше
+
+        return full_text, out_entities
+
     def _build_editor_text(self, payload: Dict[str, Any]) -> str:
+        # Больше не используется для отправки, но оставляем для совместимости вызовов, если где-то останется
         title = payload.get("channel_title") or payload.get("channel_name") or "Канал"
         username = payload.get("channel_username")
         msg_id = payload.get("message_id")
@@ -197,7 +390,6 @@ class TelegramMonitor:
         if username:
             url = f"https://t.me/{username}/{msg_id}"
         text = payload.get("text") or (payload.get("media") or {}).get("caption") or "(без текста)"
-        # Ограничим длину
         excerpt = (text[:900] + "…") if len(text) > 900 else text
 
         parts = [f"<b>Новый пост</b>", f"Канал: {('@'+username) if username else title}"]
@@ -211,14 +403,24 @@ class TelegramMonitor:
     def _escape_html(text: str) -> str:
         return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    async def _send_to_editors(self, payload: Dict[str, Any], saved_path: str) -> None:
+    async def _send_to_editors(self, payload: Dict[str, Any], saved_path: str, *, source_message: Optional[Message] = None, text_override: Optional[str] = None, entities_override: Optional[List[Dict[str, Any]]] = None) -> None:
         if not settings.BOT_TOKEN or not settings.EDITORS_CHANNEL_ID:
             logger.warning("BOT_TOKEN or EDITORS_CHANNEL_ID not configured. Skipping send to editors.")
             return
 
-        # Подготовим сообщение и кнопки
+        # Исходный текст и entities из сообщения (или переданные явно)
+        if text_override is not None and entities_override is not None:
+            src_text, src_entities = text_override, entities_override
+        elif source_message is not None:
+            src_text, src_entities = self._extract_text_and_entities(source_message)
+        else:
+            src_text, src_entities = payload.get("text") or "", []
+
+        # Собираем итоговый текст: "<title-as-link>\n\n<text-with-formatting>"
+        final_text, final_entities = self._compose_title_and_text(payload, src_text, src_entities)
+
+        # Подготовим кнопки
         file_name = os.path.basename(saved_path)
-        text = self._build_editor_text(payload)
         reply_markup = {
             "inline_keyboard": [
                 [
@@ -230,8 +432,8 @@ class TelegramMonitor:
 
         body = {
             "chat_id": settings.EDITORS_CHANNEL_ID,
-            "text": text,
-            "parse_mode": "HTML",
+            "text": final_text,
+            "entities": final_entities,
             "disable_web_page_preview": True,
             "reply_markup": reply_markup,
         }
@@ -240,7 +442,7 @@ class TelegramMonitor:
 
         def _post_json(url: str, data: Dict[str, Any]) -> None:
             try:
-                req = urlrequest.Request(url, data=json.dumps(data).encode("utf-8"), headers={"Content-Type": "application/json"})
+                req = urlrequest.Request(url, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
                 with urlrequest.urlopen(req, timeout=10) as resp:
                     if resp.status != 200:
                         logger.warning(f"Bot API non-200 response: {resp.status}")
