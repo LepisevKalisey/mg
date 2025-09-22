@@ -50,12 +50,19 @@ class Settings:
         if sess_env:
             self.SESSIONS_DIR = sess_env
 
-        # Editor bot config
+        # Editor/admin bot config
         self.BOT_TOKEN = _get_env("BOT_TOKEN")
         self.EDITORS_CHANNEL_ID = _get_env("EDITORS_CHANNEL_ID")
         if self.EDITORS_CHANNEL_ID:
             try:
                 self.EDITORS_CHANNEL_ID = int(self.EDITORS_CHANNEL_ID)
+            except Exception:
+                pass
+        # Новый: чат для уведомлений (обычно ADMIN_CHAT_ID ассистента)
+        self.ADMIN_CHAT_ID = _get_env("ADMIN_CHAT_ID")
+        if self.ADMIN_CHAT_ID:
+            try:
+                self.ADMIN_CHAT_ID = int(self.ADMIN_CHAT_ID)
             except Exception:
                 pass
 

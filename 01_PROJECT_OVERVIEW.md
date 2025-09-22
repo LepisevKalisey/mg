@@ -201,6 +201,110 @@ BATCH_SIZE=10
 ### Требования
 - Docker 20.10+
 - Docker Compose 2.0+
+- Для локального запуска без Docker: Python 3.11, pip
+
+### Переменные окружения (ключевые)
+- Assistant (обязательно): BOT_TOKEN
+- Collector (обязательно): API_ID, API_HASH
+- Рекомендуемые/опциональные:
+  - EDITORS_CHANNEL_ID — ID чата редакторов, куда Collector отправляет карточки/уведомления
+  - SERVICE_URL_ASSISTANT — публичный URL ассистента для автонастройки вебхука (например, https://host/assistant)
+  - TELEGRAM_WEBHOOK_SECRET — секрет вебхука (для заголовка X-Telegram-Bot-Api-Secret-Token)
+  - DATA_DIR — путь каталога данных внутри контейнера (обычно /app/data)
+  - SESSIONS_DIR — отдельный путь для сессий (по умолчанию /app/data/sessions)
+  - MONITORING_CHANNELS или CHANNELS_FILE — список каналов для сбора
+  - ADMIN_CHAT_ID — ID админ-чата для ограничений команд и уведомлений
+
+Примечания:
+- Docker Compose автоматически подхватывает файл .env в корне проекта. Для локальной разработки можно использовать .env.dev и/или скопировать его в .env.
+- Ассистент при локальном запуске (без Docker) подхватывает .env из корня через python-dotenv.
+
+### Локальный запуск (Docker)
+1) Создайте внешнюю сеть Docker (используется обоими сервисами):
+   - docker network create mg_net
+
+2) Подготовьте .env или .env.dev с переменными (минимум):
+   - BOT_TOKEN=<токен_бота>
+   - API_ID=<api_id>
+   - API_HASH=<api_hash>
+   - EDITORS_CHANNEL_ID=<id_чата_редакторов> (рекомендуется)
+   - SERVICE_URL_ASSISTANT=<публичный_url> (опционально, для вебхука)
+   - TELEGRAM_WEBHOOK_SECRET=<секрет> (опционально)
+   - HOST_DATA_DIR=<путь_на_хосте_для_тома_данных>
+     - Windows пример: HOST_DATA_DIR=c:/Projects/mg/data
+     - Linux пример: HOST_DATA_DIR=/srv/mg
+
+3) Запустите сервисы по одному:
+   - Assistant: docker compose -f assistant.yml up -d --build assistant
+   - Collector: docker compose -f collector.yml up -d --build collector
+
+4) Проверки работоспособности:
+   - Assistant: docker compose -f assistant.yml exec assistant sh -lc "curl -fsS http://127.0.0.1:8003/health"
+   - Collector: docker compose -f collector.yml exec collector sh -lc "curl -fsS http://127.0.0.1:8001/health"
+
+5) Вебхук ассистента:
+   - Если задан SERVICE_URL_ASSISTANT — ассистент на старте автоматически выставит вебхук на <SERVICE_URL_ASSISTANT>/telegram/webhook.
+   - Диагностика: GET http://127.0.0.1:8003/debug/webhook-info и GET http://127.0.0.1:8003/telegram/webhook
+   - Если публичного URL нет — оставьте SERVICE_URL_ASSISTANT пустым, автоконфигурация будет пропущена. Для разработки используйте Tailscale/Cloudflare Tunnel/ngrok.
+
+### Локальный запуск (без Docker)
+1) Установите зависимости:
+   - python -m venv .venv
+   - (Windows) .venv\Scripts\Activate.ps1
+   - (Linux/macOS) source .venv/bin/activate
+   - pip install -r requirements.txt
+
+2) Создайте .env в корне проекта (минимум):
+   - Assistant: BOT_TOKEN=..., SERVICE_URL_ASSISTANT=... (опционально), TELEGRAM_WEBHOOK_SECRET=... (опционально)
+   - Collector: API_ID=..., API_HASH=..., PHONE_NUMBER=... (для первичной авторизации), EDITORS_CHANNEL_ID=... (опционально)
+   - Если DATA_DIR не задан — сервисы используют ./data; убедитесь, что каталоги ./data/pending, ./data/approved, ./data/sessions существуют (они создаются автоматически при старте).
+
+3) Запуск сервисов:
+   - Assistant: uvicorn app.assistant.main:app --host 0.0.0.0 --port 8003
+   - Collector: uvicorn app.collector.main:app --host 0.0.0.0 --port 8001
+
+4) Проверки:
+   - curl http://127.0.0.1:8003/health
+   - curl http://127.0.0.1:8001/health
+
+### Первичная авторизация Collector (Telethon)
+- Убедитесь, что заданы API_ID и API_HASH; при первом входе предоставьте PHONE_NUMBER (или укажите номер в запросе).
+- Запустите процесс авторизации через API коллектора (в контейнере):
+  - docker compose -f collector.yml exec collector sh -lc "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"phone\":\"+<номер>\", \"chat_id\": <ADMIN_CHAT_ID>}' http://127.0.0.1:8001/api/collector/auth/start"
+- Введите код подтверждения:
+  - docker compose -f collector.yml exec collector sh -lc "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"code\":\"12345\"}' http://127.0.0.1:8001/api/collector/auth/code"
+- Если включена 2FA, отправьте пароль:
+  - docker compose -f collector.yml exec collector sh -lc "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"password\":\"<пароль>\"}' http://127.0.0.1:8001/api/collector/auth/password"
+- Проверка статуса авторизации:
+  - docker compose -f collector.yml exec collector sh -lc "curl -fsS http://127.0.0.1:8001/api/collector/auth/status"
+
+Примечание: для уведомлений и сообщений от Collector в редакторский чат задайте BOT_TOKEN и EDITORS_CHANNEL_ID.
+
+### Запуск на сервере (prod)
+1) Подготовьте прод-окружение (.env):
+   - BOT_TOKEN, API_ID, API_HASH (обязательно)
+   - EDITORS_CHANNEL_ID (рекомендуется)
+   - SERVICE_URL_ASSISTANT (публичный https), TELEGRAM_WEBHOOK_SECRET (для безопасности)
+   - HOST_DATA_DIR=/srv/mg (или свой путь) и DATA_DIR=/app/data
+   - ADMIN_CHAT_ID (опционально)
+
+2) Создайте сеть и каталоги данных:
+   - docker network create mg_net
+   - mkdir -p /srv/mg && chown -R <user>:<group> /srv/mg
+
+3) Запустите сервисы и проверьте:
+   - docker compose -f assistant.yml up -d --build assistant
+   - docker compose -f collector.yml up -d --build collector
+   - curl http://localhost:8003/health
+   - curl http://localhost:8001/health
+
+4) Обновление без простоя:
+   - docker compose -f assistant.yml up -d --build assistant
+   - docker compose -f collector.yml up -d --build collector
+
+5) Вебхук в проде:
+   - Убедитесь, что ваш обратный прокси/маршрутизация (например, Tailscale/NGINX) публикует порт 8003 по адресу SERVICE_URL_ASSISTANT.
+   - Ассистент на старте автоматически настроит вебхук; проверить можно через /debug/webhook-info.
 
 ## Безопасность
 
@@ -342,3 +446,13 @@ Content-Type: application/json
 - В assistant `/health` показывает корректные пути
 - Для авторизации использован `FORCE_SMS=1` (при необходимости)
 - Файлы в `/app/data/pending` создаются (collector), и перемещаются в `/app/data/approved` (assistant)
+
+## tg accounts
+### Chorizzo1
+API_ID=23905873
+API_HASH=b7e4242c20df906337c07f2e59cebdbe
+PHONE_NUMBER=+77073492959
+### Rimus Striker
+API_ID=23461862
+API_HASH=376b4723b246f9a3f3e65039de8cf998
+PHONE_NUMBER=+77071793989

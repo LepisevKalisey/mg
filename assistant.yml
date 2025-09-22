@@ -8,8 +8,14 @@ services:
     
     environment:
       - COLLECTOR_URL=http://collector:8001
+      - BOT_TOKEN
+      - SERVICE_URL_ASSISTANT
+      - TELEGRAM_WEBHOOK_SECRET
+      - ADMIN_CHAT_ID
+      - AGGREGATOR_URL
+      - DATA_DIR
     volumes:
-      - /home/extdrv/mg/:/app/data
+      - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
     ports:
       - "8003:8003"
     healthcheck:

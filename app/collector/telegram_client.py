@@ -28,6 +28,7 @@ from telethon.tl.types import (
 )
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 
 from .config import settings
 from .storage import save_pending_message
@@ -80,6 +81,13 @@ class TelegramMonitor:
         self._quiet_mode: bool = False
         self._quiet_schedule: Optional[str] = None
 
+        # Состояние авторизации (через код/пароль)
+        self._auth_phone: Optional[str] = None
+        self._auth_hash: Optional[str] = None
+        self._await_code: bool = False
+        self._await_password: bool = False
+        self._auth_chat_id: Optional[int] = None
+
     @property
     def authorized(self) -> bool:
         return self._authorized
@@ -94,10 +102,14 @@ class TelegramMonitor:
                     "Likely cause: session SQLite is read-only. Check mount mode and permissions for '%s'",
                     settings.SESSIONS_DIR,
                 )
+            # Уведомим через бота, что требуется авторизация
+            await self.notify_auth_required()
             return
         self._authorized = await self.client.is_user_authorized()
         if not self._authorized:
             logger.error("Telethon is not authorized. Ensure mtproto.session exists in %s and matches API_ID/API_HASH.", settings.SESSIONS_DIR)
+            # Уведомим через бота, что требуется авторизация
+            await self.notify_auth_required()
             return
 
         # Регистрируем обработчик событий только если есть список каналов
@@ -133,6 +145,23 @@ class TelegramMonitor:
             await self.client.run_until_disconnected()
         except asyncio.CancelledError:
             pass
+
+    def _post_auth_start_handlers(self) -> None:
+        """После успешной авторизации регистрируем обработчики и запускаем фонового клиента."""
+        try:
+            chats_filter = self._resolve_chats_filter()
+            if chats_filter:
+                try:
+                    self.client.add_event_handler(self._on_new_message, events.NewMessage(chats=chats_filter))
+                    self.client.add_event_handler(self._on_new_album, events.Album(chats=chats_filter))
+                except Exception:
+                    logger.exception("Failed to register handlers after auth")
+            if not self._task or self._task.done():
+                self._task = asyncio.create_task(self._run_client())
+                self._started = True
+                logger.info("Telegram client run loop started after auth")
+        except Exception:
+            logger.exception("_post_auth_start_handlers failed")
 
     def _resolve_chats_filter(self) -> List[str] | None:
         # Возвращаем список чатов/каналов (@channel)
@@ -625,3 +654,152 @@ class TelegramMonitor:
 
         # Не блокируем event loop
         await asyncio.to_thread(_post_json, api_url, body)
+
+    # Уведомляет в канал редакторов, что требуется авторизация, с кнопкой запуска.
+    async def notify_auth_required(self) -> None:
+        """Уведомляет в чат бота/админа, что требуется авторизация, с кнопкой запуска."""
+        if not settings.BOT_TOKEN or not settings.ADMIN_CHAT_ID:
+            logger.warning("BOT_TOKEN or ADMIN_CHAT_ID not configured. Skipping auth notification.")
+            return
+        # Определяем номер телефона для контекста уведомления
+        phone_hint = getattr(self, "_auth_phone", None) or (settings.PHONE_NUMBER or "не указан")
+        text = (
+            "❗ Требуется авторизация MTProto аккаунта для коллектора.\n"
+            f"Номер: {phone_hint}\n"
+            "Нажмите кнопку ниже, затем пришлите код из SMS/звонка в ответном сообщении."
+        )
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔐 Авторизоваться", "callback_data": "auth:start"}
+                ]
+            ]
+        }
+        body = {
+            "chat_id": settings.ADMIN_CHAT_ID,
+            "text": text,
+            "disable_web_page_preview": True,
+            "reply_markup": reply_markup,
+        }
+        api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
+
+        def _post_json(url: str, data: Dict[str, Any]) -> None:
+            try:
+                req = urlrequest.Request(url, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
+                with urlrequest.urlopen(req, timeout=10) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Bot API non-200 response: {resp.status}")
+            except HTTPError as he:
+                try:
+                    err_body = he.read().decode("utf-8")
+                except Exception:
+                    err_body = str(he)
+                logger.error(f"Bot API HTTPError: {he.code} {err_body}")
+            except URLError as ue:
+                logger.error(f"Bot API URLError: {ue}")
+            except Exception as e:
+                logger.exception(f"Bot API request failed: {e}")
+
+        await asyncio.to_thread(_post_json, api_url, body)
+
+    def auth_status(self) -> Dict[str, Any]:
+        return {
+            "authorized": self._authorized,
+            "awaiting_code": self._await_code,
+            "awaiting_password": self._await_password,
+            "phone": self._auth_phone,
+            "chat_id": self._auth_chat_id,
+        }
+
+    async def start_auth(self, phone: Optional[str], chat_id: Optional[int] = None) -> bool:
+        """Старт авторизации: отправляет код на номер телефона.
+        Если phone не задан — берём settings.PHONE_NUMBER. Сохраняем chat_id, чтобы ожидать ввод в нужном чате.
+        """
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+            # Если уже авторизованы — ничего не делаем
+            self._authorized = await self.client.is_user_authorized()
+            if self._authorized:
+                self._await_code = False
+                self._await_password = False
+                return True
+
+            # Выбираем номер телефона
+            phone_num = (phone or settings.PHONE_NUMBER or '').strip()
+            if not phone_num:
+                logger.error("PHONE_NUMBER not provided and settings.PHONE_NUMBER is empty")
+                return False
+            self._auth_phone = phone_num
+            self._auth_chat_id = chat_id
+            # Запрашиваем код
+            res = await self.client.send_code_request(phone_num)
+            # Telethon возвращает структуру с phone_code_hash
+            try:
+                self._auth_hash = getattr(res, 'phone_code_hash', None)
+            except Exception:
+                self._auth_hash = None
+            self._await_code = True
+            self._await_password = False
+            logger.info("Auth code requested for %s", phone_num)
+            return True
+        except Exception as e:
+            logger.exception("start_auth failed: %s", e)
+            return False
+
+    async def submit_code(self, code: str) -> str:
+        """Принимает код из SMS/звонка и завершает вход, либо включает режим запроса 2FA пароля.
+        Возвращает: 'ok' | 'password_required' | 'error:<msg>'
+        """
+        code = (code or '').strip()
+        if not code:
+            return "error:empty_code"
+        if not self._await_code or not self._auth_phone:
+            return "error:not_waiting_code"
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+            try:
+                await self.client.sign_in(phone=self._auth_phone, code=code)
+            except SessionPasswordNeededError:
+                # Нужен 2FA пароль
+                self._await_password = True
+                self._await_code = False
+                logger.info("2FA password required for %s", self._auth_phone)
+                return "password_required"
+            except PhoneCodeInvalidError:
+                logger.warning("Invalid phone code entered for %s", self._auth_phone)
+                return "error:invalid_code"
+            # Успешная авторизация
+            self._authorized = await self.client.is_user_authorized()
+            self._await_code = False
+            self._await_password = False
+            logger.info("Authorized after code for %s: %s", self._auth_phone, self._authorized)
+            if self._authorized:
+                self._post_auth_start_handlers()
+            return "ok" if self._authorized else "error:not_authorized"
+        except Exception as e:
+            logger.exception("submit_code failed: %s", e)
+            return f"error:{str(e)}"
+
+    async def submit_password(self, password: str) -> bool:
+        """Ввод 2FA пароля, завершение авторизации."""
+        password = (password or '').strip()
+        if not password:
+            return False
+        if not self._await_password:
+            return False
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+            await self.client.sign_in(password=password)
+            self._authorized = await self.client.is_user_authorized()
+            self._await_password = False
+            self._await_code = False
+            logger.info("Authorized after 2FA password for %s: %s", self._auth_phone, self._authorized)
+            if self._authorized:
+                self._post_auth_start_handlers()
+            return self._authorized
+        except Exception as e:
+            logger.exception("submit_password failed: %s", e)
+            return False

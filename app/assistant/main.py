@@ -165,6 +165,79 @@ def _clear_markup(chat_id: Optional[int], message_id: Optional[int]) -> None:
     _tg_api("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id, "reply_markup": {}})
 
 
+# --- Авторизация Collector через бота ---
+_AUTH_WAIT: dict[int, str] = {}
+
+def _start_auth_flow(chat_id: int) -> None:
+    # Если Collector недоступен — сообщим
+    h = _rest_call("GET", settings.COLLECTOR_URL + "/health") or {}
+    if not (h.get("status") == "ok" or h.get("authorized") in (True, False)):
+        _send_message(chat_id, "Collector недоступен. Попробуйте позже.")
+        return
+
+    # Стартуем авторизацию: используем ADMIN_CHAT_ID как приоритетный канал управления
+    target_chat = settings.ADMIN_CHAT_ID or chat_id
+    # Определяем телефон из статуса, если доступен
+    phone_hint = None
+    try:
+        st = _rest_call("GET", settings.COLLECTOR_URL + "/api/collector/auth/status") or {}
+        phone_hint = ((st.get("status") or {}).get("phone") or None)
+    except Exception:
+        pass
+    phone_line = f"\nНомер: {phone_hint}" if phone_hint else ""
+
+    # Если кнопка нажата не из админ-чата, подсказка
+    if settings.ADMIN_CHAT_ID and chat_id != settings.ADMIN_CHAT_ID:
+        _send_message(chat_id, "Запрос авторизации принят. Я написал инструкции в админ-чат.")
+        _send_message(settings.ADMIN_CHAT_ID, "Запрос авторизации: отправьте код из Telegram." + phone_line)
+    else:
+        _send_message(target_chat, "Запрос авторизации: отправьте код из Telegram." + phone_line)
+
+    res = _rest_call("POST", settings.COLLECTOR_URL + "/api/collector/auth/start", {"phone": None, "chat_id": target_chat}) or {}
+    if res.get("ok"):
+        _AUTH_WAIT[target_chat] = "code"
+        _send_message(target_chat, "Код отправлен. Пришлите его в ответ.")
+    else:
+        _send_message(target_chat, "Не удалось инициировать авторизацию. Проверьте номер телефона в настройках Collector.")
+
+
+def _handle_auth_input(chat_id: int, text: str) -> None:
+    mode = _AUTH_WAIT.get(chat_id)
+    if not mode:
+        return
+    if settings.ADMIN_CHAT_ID is not None and chat_id != settings.ADMIN_CHAT_ID:
+        return
+    if mode == "code":
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/auth/code"
+        resp = _rest_call("POST", url, {"code": text})
+        if not resp:
+            _send_message(chat_id, "Collector недоступен")
+            return
+        result = resp.get("result") or ""
+        st = resp.get("status") or {}
+        if result == "ok" and (resp.get("ok") or st.get("authorized")):
+            _AUTH_WAIT.pop(chat_id, None)
+            _send_message(chat_id, "Авторизация выполнена")
+        elif result == "password_required" or st.get("await_password"):
+            _AUTH_WAIT[chat_id] = "password"
+            _send_message(chat_id, "Требуется пароль 2FA. Введите пароль")
+        elif result == "error:invalid_code":
+            _send_message(chat_id, "Неверный код. Пожалуйста, проверьте и введите код ещё раз")
+        else:
+            _send_message(chat_id, f"Ошибка: {result or 'неизвестная'}. Попробуйте снова")
+    elif mode == "password":
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/auth/password"
+        resp = _rest_call("POST", url, {"password": text})
+        if not resp:
+            _send_message(chat_id, "Collector недоступен")
+            return
+        st = resp.get("status") or {}
+        if resp.get("ok") and (st.get("authorized")):
+            _AUTH_WAIT.pop(chat_id, None)
+            _send_message(chat_id, "Авторизация выполнена")
+        else:
+            _send_message(chat_id, "Пароль не принят. Попробуйте снова")
+
 def _approve(filename: str) -> bool:
     src = os.path.join(settings.PENDING_DIR, filename)
     dst = os.path.join(settings.APPROVED_DIR, filename)
@@ -295,6 +368,10 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
     # Маршрутизация команд
     if cmd in ("/help", "/start"):
         _send_message(chat_id, _help_text(), reply_to_message_id=message_id)
+        return
+
+    if cmd == "/auth_start":
+        _start_auth_flow(chat_id)
         return
 
     if cmd == "/add_source":
@@ -488,6 +565,16 @@ async def telegram_webhook(request: Request):
 
         logger.info(f"Callback received: data={data}, chat_id={chat_id}, message_id={msg_id}")
 
+        # Авторизация Collector
+        if data == "auth:start":
+            _answer_callback(cb_id, "Запускаю авторизацию")
+            _clear_markup(chat_id, msg_id)
+            target_chat = settings.ADMIN_CHAT_ID or chat_id
+            if settings.ADMIN_CHAT_ID and chat_id != settings.ADMIN_CHAT_ID:
+                _send_message(settings.ADMIN_CHAT_ID, "Запрос авторизации: отправьте код из Telegram.")
+            _start_auth_flow(target_chat)
+            return JSONResponse({"ok": True})
+
         result_text = ""
         if data.startswith("approve:"):
             filename = os.path.basename(data.split(":", 1)[1])
@@ -519,6 +606,9 @@ async def telegram_webhook(request: Request):
         text = (msg.get("text") or "").strip()
         if text.startswith("/"):
             _handle_command(chat_id, msg_id, text)
+        else:
+            # Обрабатываем ввод кода/пароля для авторизации Collector
+            _handle_auth_input(chat_id, text)
         return JSONResponse({"ok": True})
 
     # Остальные типы апдейтов игнорируем

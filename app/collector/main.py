@@ -205,3 +205,27 @@ async def set_quiet_schedule(payload: dict = Body(...)):
     st["quiet_schedule"] = rng
     _save_state(st)
     return {"ok": True, "range": rng, "quiet_now": monitor.is_quiet_now()}
+
+
+@app.post("/api/collector/auth/start")
+async def auth_start(payload: dict = Body(...)):
+    phone = (payload.get("phone") or "").strip() or None
+    chat_id = payload.get("chat_id")
+    ok = await monitor.start_auth(phone, chat_id)
+    return {"ok": ok, "status": monitor.auth_status()}
+
+@app.get("/api/collector/auth/status")
+async def auth_status():
+    return {"ok": True, "status": monitor.auth_status()}
+
+@app.post("/api/collector/auth/code")
+async def auth_code(payload: dict = Body(...)):
+    code = (payload.get("code") or "").strip()
+    res = await monitor.submit_code(code)
+    return {"ok": res == "ok", "result": res, "status": monitor.auth_status()}
+
+@app.post("/api/collector/auth/password")
+async def auth_password(payload: dict = Body(...)):
+    password = (payload.get("password") or "").strip()
+    ok = await monitor.submit_password(password)
+    return {"ok": ok, "status": monitor.auth_status()}
