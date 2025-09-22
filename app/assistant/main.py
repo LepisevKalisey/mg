@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import asyncio
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request
@@ -123,14 +124,14 @@ def _tg_api(method: str, body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return data
     except HTTPError as he:
         try:
-            err_body = he.read().decode("utf-8")
+            text = he.read().decode("utf-8")
+            logger.warning(f"Bot API HTTPError: method={method}, status={he.code}, body={text}")
         except Exception:
-            err_body = str(he)
-        logger.error(f"HTTPError {he.code} on {url}: {err_body}")
+            logger.warning(f"Bot API HTTPError: method={method}, status={he.code}")
     except URLError as ue:
-        logger.error(f"URLError on {url}: {ue}")
+        logger.warning(f"Bot API URLError: method={method}, err={ue}")
     except Exception:
-        logger.exception(f"Request failed: {url}")
+        logger.exception(f"Bot API error: method={method}")
     return None
 
 
@@ -149,11 +150,7 @@ def _send_message(chat_id: int, text: str, reply_to_message_id: Optional[int] = 
 def _answer_callback(callback_id: Optional[str], text: str) -> None:
     if not callback_id:
         return
-    _tg_api("answerCallbackQuery", {
-        "callback_query_id": callback_id,
-        "text": text,
-        "show_alert": False
-    })
+    _tg_api("answerCallbackQuery", {"callback_query_id": callback_id, "text": text, "show_alert": False})
 
 
 def _delete_message(chat_id: Optional[int], message_id: Optional[int]) -> None:
@@ -165,11 +162,7 @@ def _delete_message(chat_id: Optional[int], message_id: Optional[int]) -> None:
 def _clear_markup(chat_id: Optional[int], message_id: Optional[int]) -> None:
     if not chat_id or not message_id:
         return
-    _tg_api("editMessageReplyMarkup", {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "reply_markup": {"inline_keyboard": []}
-    })
+    _tg_api("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id, "reply_markup": {}})
 
 
 def _approve(filename: str) -> bool:
@@ -424,32 +417,32 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
         return
 
     if cmd == "/status":
-        # assistant
-        self_status = {"service": "assistant", "status": "ok"}
-        # collector
-        col_status = None
         try:
-            col_status = _rest_call("GET", settings.COLLECTOR_URL.rstrip("/") + "/health")
-        except Exception:
+            self_status = {"service": "assistant", "status": "ok"}
             col_status = None
-        # aggregator
-        agg_status = None
-        if settings.AGGREGATOR_URL:
             try:
-                agg_status = _rest_call("GET", settings.AGGREGATOR_URL.rstrip("/") + "/health")
+                col_status = _rest_call("GET", settings.COLLECTOR_URL.rstrip("/") + "/health")
             except Exception:
-                agg_status = None
-        lines = []
-        def fmt(svc: Optional[Dict[str, Any]], name: str) -> str:
-            if not svc:
-                return f"{name}: недоступен"
-            st = svc.get("status") or "unknown"
-            return f"{name}: {st}"
-        lines.append(fmt(self_status, "assistant"))
-        lines.append(fmt(col_status, "collector"))
-        if settings.AGGREGATOR_URL:
-            lines.append(fmt(agg_status, "aggregator"))
-        _send_message(chat_id, "\n".join(lines))
+                col_status = None
+            agg_status = None
+            if settings.AGGREGATOR_URL:
+                try:
+                    agg_status = _rest_call("GET", settings.AGGREGATOR_URL.rstrip("/") + "/health")
+                except Exception:
+                    agg_status = None
+            lines = []
+            def fmt(svc: Optional[Dict[str, Any]], name: str) -> str:
+                if not svc:
+                    return f"{name}: недоступен"
+                st = svc.get("status") or "unknown"
+                return f"{name}: {st}"
+            lines.append(fmt(self_status, "assistant"))
+            lines.append(fmt(col_status, "collector"))
+            if settings.AGGREGATOR_URL:
+                lines.append(fmt(agg_status, "aggregator"))
+            _send_message(chat_id, "\n".join(lines))
+        except Exception:
+            logger.exception("/status handler failed")
         return
 
     # Неизвестная команда

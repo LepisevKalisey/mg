@@ -41,6 +41,11 @@ class Settings:
         self.AGGREGATOR_URL = _get_env("AGGREGATOR_URL")
         # Ограничение обработки команд ботом по чату-администратору (опционально)
         admin_chat = _get_env("ADMIN_CHAT_ID")
+        if not admin_chat:
+            # Backward compatibility: allow ROLE_ADMINS to provide admin chat id (take the first if comma-separated)
+            role_admins = _get_env("ROLE_ADMINS")
+            if role_admins:
+                admin_chat = role_admins.split(",")[0].strip()
         self.ADMIN_CHAT_ID: Optional[int] = None
         if admin_chat:
             try:
