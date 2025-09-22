@@ -26,11 +26,20 @@ def _sanitize_filename(name: str) -> str:
 
 
 def save_pending_message(pending_dir: str, payload: Dict[str, Any]) -> str:
-    # Файл как: {ts}_{channel_name}_{message_id}.json
+    # Файл как: {ts}_{channel}_{message_id}.json
     ts = int(time.time())
-    channel_name = _sanitize_filename(str(payload.get("channel_name", "unknown")))
+    # Предпочитаем username; если его нет — используем channel_id (стабильный ASCII), далее — заголовок
+    ch_username = str(payload.get("channel_username") or "").strip()
+    if ch_username:
+        channel_part = _sanitize_filename(ch_username)
+    else:
+        ch_id = str(payload.get("channel_id") or "").strip()
+        if ch_id:
+            channel_part = _sanitize_filename(ch_id)
+        else:
+            channel_part = _sanitize_filename(str(payload.get("channel_name", "unknown")))
     message_id = str(payload.get("message_id", "unknown"))
-    filename = f"{ts}_{channel_name}_{message_id}.json"
+    filename = f"{ts}_{channel_part}_{message_id}.json"
     path = os.path.join(pending_dir, filename)
 
     with open(path, "w", encoding="utf-8") as f:
