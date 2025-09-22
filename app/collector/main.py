@@ -71,6 +71,11 @@ def _save_state(data: dict) -> None:
 async def on_startup():
     # Ensure data directories exist and start monitoring (if already authorized)
     ensure_dirs(settings.DATA_DIR, settings.PENDING_DIR, settings.APPROVED_DIR, settings.SESSIONS_DIR)
+    # Логируем версию сервиса при запуске
+    try:
+        logger.info("Collector version: %s", getattr(app, "version", "unknown"))
+    except Exception:
+        pass
     # Load persisted state (quiet flags)
     st = _load_state()
     if isinstance(st.get("quiet_mode"), bool):

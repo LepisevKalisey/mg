@@ -31,6 +31,11 @@ async def on_startup():
     # Директория конфигурации агрегатора
     os.makedirs(os.path.dirname(settings.AGGREGATOR_CONFIG_PATH), exist_ok=True)
     logger.info("Assistant service started (webhook mode)")
+    # Логируем версию сервиса при запуске
+    try:
+        logger.info("Assistant version: %s", getattr(app, "version", "unknown"))
+    except Exception:
+        pass
 
     # Автоконфигурация вебхука
     if not settings.SERVICE_URL:
