@@ -7,6 +7,7 @@ services:
       dockerfile: Dockerfile
     command: ["uvicorn", "app.collector.main:app", "--host", "0.0.0.0", "--port", "8001"]
     restart: unless-stopped
+    
     volumes:
       - /home/extdrv/mg/:/app/data
     healthcheck:
@@ -16,7 +17,9 @@ services:
       retries: 5
       start_period: 10s
     networks:
-      - mg_net
+      mg_net:
+        aliases:
+          - collector
 
 networks:
   mg_net:

@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     command: ["uvicorn", "app.assistant.main:app", "--host", "0.0.0.0", "--port", "8003"]
     restart: unless-stopped
+    
     environment:
       - COLLECTOR_URL=http://collector:8001
     volumes:
