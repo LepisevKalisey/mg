@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
+from datetime import datetime
 
 # Подхватим .env из корня проекта при локальном запуске
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -22,6 +23,55 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(nam
 logger = logging.getLogger("assistant.main")
 
 app = FastAPI(title="MediaGenerator Assistant", version="0.3.0")
+
+# --- Ежедневный планировщик дайджеста ---
+_scheduler_task: Optional[asyncio.Task] = None
+
+
+def _now_date_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _parse_hhmm(s: str) -> Optional[tuple[int, int]]:
+    try:
+        hh, mm = s.split(":", 1)
+        h, m = int(hh), int(mm)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+        return None
+    except Exception:
+        return None
+
+
+async def _digest_scheduler() -> None:
+    logger.info("Scheduler started")
+    while True:
+        try:
+            cfg = _load_agg_config()
+            sched = (cfg.get("schedule") or "").strip()
+            parsed = _parse_hhmm(sched) if sched else None
+            if parsed and settings.AGGREGATOR_URL:
+                h, m = parsed
+                now = datetime.now()
+                target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                last_date = cfg.get("last_run_date")
+                # Если время наступило и сегодня ещё не запускали — запускаем
+                if now >= target and last_date != _now_date_str():
+                    limit = cfg.get("limit")
+                    url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
+                    if isinstance(limit, int) and limit > 0:
+                        url = f"{url}?limit={int(limit)}"
+                    logger.info(f"Scheduled publish trigger: {url}")
+                    resp = _rest_call("POST", url, {}) or {}
+                    if resp.get("ok") and resp.get("result") == "ok" and resp.get("published"):
+                        cfg["last_run_date"] = _now_date_str()
+                        _save_agg_config(cfg)
+                        logger.info("Scheduled publish finished successfully")
+                    else:
+                        logger.warning(f"Scheduled publish failed or not published: resp={resp}")
+        except Exception:
+            logger.exception("Scheduler tick error")
+        await asyncio.sleep(30)
 
 
 @app.on_event("startup")
@@ -37,6 +87,11 @@ async def on_startup():
         logger.info("Assistant version: %s", getattr(app, "version", "unknown"))
     except Exception:
         pass
+
+    # Запускаем фоновый планировщик публикаций
+    global _scheduler_task
+    if _scheduler_task is None:
+        _scheduler_task = asyncio.create_task(_digest_scheduler())
 
     # Автоконфигурация вебхука
     if not settings.SERVICE_URL:
@@ -489,12 +544,20 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
         resp = _rest_call("POST", url, {})
         if resp and resp.get("ok"):
             _send_message(chat_id, "Публикация запущена")
+            try:
+                if resp.get("published"):
+                    cfg = _load_agg_config()
+                    cfg["last_run_date"] = _now_date_str()
+                    _save_agg_config(cfg)
+            except Exception:
+                logger.warning("Failed to update last_run_date after /publish_now")
         else:
             _send_message(chat_id, "Не удалось инициировать публикацию")
         return
 
     if cmd == "/status":
         try:
+            # Собираем статусы сервисов
             self_status = {"service": "assistant", "status": "ok"}
             col_status = None
             try:
@@ -507,16 +570,57 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
                     agg_status = _rest_call("GET", settings.AGGREGATOR_URL.rstrip("/") + "/health")
                 except Exception:
                     agg_status = None
-            lines = []
-            def fmt(svc: Optional[Dict[str, Any]], name: str) -> str:
-                if not svc:
-                    return f"{name}: недоступен"
-                st = svc.get("status") or "unknown"
-                return f"{name}: {st}"
-            lines.append(fmt(self_status, "assistant"))
-            lines.append(fmt(col_status, "collector"))
+
+            # Конфигурация агрегатора (расписание и лимиты)
+            cfg = _load_agg_config()
+            schedule = cfg.get("schedule")
+            limit = cfg.get("limit")
+            last_run_date = cfg.get("last_run_date")
+
+            # Подсчёт количества файлов в approved
+            approved_count = None
+            try:
+                approved_count = len([f for f in os.listdir(settings.APPROVED_DIR) if f.endswith('.json')])
+            except Exception:
+                approved_count = None
+
+            lines: list[str] = []
+            lines.append("Assistant: ok")
+            # Информация о вебхуке
+            wh_info = _tg_api("getWebhookInfo", {}) or {}
+            result = wh_info.get("result", {}) if isinstance(wh_info, dict) else {}
+            expected_wh = (settings.SERVICE_URL.rstrip("/") + "/telegram/webhook") if settings.SERVICE_URL else None
+            curr_wh = result.get("url")
+            lines.append(f"Webhook: current={curr_wh or 'none'} expected={expected_wh or 'none'}")
+            # Параметры ассистента
+            lines.append(f"Admin chat: {settings.ADMIN_CHAT_ID if settings.ADMIN_CHAT_ID is not None else 'not set'}")
+            lines.append(f"BOT_TOKEN: {'set' if bool(settings.BOT_TOKEN) else 'not set'}")
+            lines.append(f"Collector URL: {settings.COLLECTOR_URL}")
+            lines.append(f"Aggregator URL: {settings.AGGREGATOR_URL or 'not set'}")
+
+            # Collector
+            if not col_status:
+                lines.append("collector: недоступен")
+            else:
+                st = col_status.get("status") or "unknown"
+                authorized = col_status.get("authorized")
+                channels = col_status.get("channels") or []
+                quiet = (col_status.get("quiet") or {})
+                lines.append(f"collector: {st}, authorized={authorized}, channels={len(channels)}")
+                lines.append(f"quiet: manual={quiet.get('manual')} schedule={quiet.get('schedule')} now={quiet.get('quiet_now')}")
+
+            # Aggregator
             if settings.AGGREGATOR_URL:
-                lines.append(fmt(agg_status, "aggregator"))
+                if not agg_status:
+                    lines.append("aggregator: недоступен")
+                else:
+                    st = agg_status.get("status") or "unknown"
+                    lines.append(f"aggregator: {st}, approved_count={approved_count if approved_count is not None else 'n/a'}")
+                    lines.append(f"approved_dir: {agg_status.get('approved_dir')}")
+                    lines.append(f"output_dir: {agg_status.get('output_dir')}")
+                # Параметры публикации
+                lines.append(f"schedule: {schedule or 'not set'}; limit: {limit or 'default'}; last_run: {last_run_date or 'never'}")
+
             _send_message(chat_id, "\n".join(lines))
         except Exception:
             logger.exception("/status handler failed")
@@ -613,3 +717,14 @@ async def telegram_webhook(request: Request):
 
     # Остальные типы апдейтов игнорируем
     return JSONResponse({"ok": True})
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    global _scheduler_task
+    if _scheduler_task:
+        _scheduler_task.cancel()
+        try:
+            await _scheduler_task
+        except Exception:
+            pass
