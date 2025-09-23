@@ -73,8 +73,8 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
         lines: List[str] = [
             "Ты — редактор дайджестов. Сформируй краткий дайджест на русском языке строго в формате Markdown для публикации в Telegram.",
             "Для каждого материала выведи РОВНО три строки:",
-            "1) Первая строка — короткий заголовок как Markdown-ссылка на оригинальный пост: [Заголовок](URL). Если URL отсутствует — просто короткий заголовок без ссылки.",
-            "2) Вторая строка — ровно одно релевантное эмодзи в начале строки и отсылка к источнику (без ссылок): например ‘📰 Канал <ИмяКанала> (@username) сообщает, что …’ или ‘🧠 Как написали в ForbesRussia, …’ или похожее по смыслу.",
+            "1) Первая строка — короткий заголовок как жирная Markdown-ссылка на оригинальный пост: **[Заголовок](URL)**. Если URL отсутствует — просто жирный короткий заголовок без ссылки.",
+            "2) Вторая строка — ровно одно релевантное эмодзи в начале строки и отсылка к источнику БЕЗ @username: используй вариативные формулировки (например: ‘📰 Как сообщает <ИмяКанала>, …’, ‘🧠 По данным <ИмяКанала>, …’, ‘📣 В канале <ИмяКанала> отмечают, …’). Не повторяй одну и ту же фразу.",
             "3) Третья строка — краткое содержание сообщения (2–4 предложения).",
             "Между материалами — одна пустая строка. Не используй списки, заголовки разделов, HTML и дополнительные пояснения. Выводи только результат в Markdown.",
         ]
@@ -82,22 +82,20 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
         lines = [
             f"You are a digest editor. Produce a concise digest in {lang} strictly in Telegram-ready Markdown.",
             "For each item output EXACTLY three lines:",
-            "1) First line — short title as a Markdown link to the original post: [Title](URL). If URL is missing — just a short title without link.",
-            "2) Second line — exactly one relevant emoji at the start and attribution to the source (without links).",
+            "1) First line — short title as a bold Markdown link to the original post: **[Title](URL)**. If URL is missing — just a bold short title without link.",
+            "2) Second line — exactly one relevant emoji at the start and attribution to the source WITHOUT @username; vary the phrasing across items.",
             "3) Third line — brief summary (2–4 sentences).",
             "Separate items with a single empty line. No lists, section headers, HTML or extra explanations. Output only the Markdown result.",
         ]
     lines.append("Исходные данные по материалам (title, url, text):" if lang == "ru" else "Input items (title, url, text):")
     for it in items:
         p = it["payload"]
-        title = p.get("channel_title") or p.get("channel_name") or ("Канал" if lang == "ru" else "Channel")
-        username = p.get("channel_username")
-        msg_id = p.get("message_id")
-        url = f"https://t.me/{username}/{msg_id}" if username and msg_id else ""
+        # Берём заголовок сообщения, а не название канала
+        title = p.get("title") or p.get("channel_title") or p.get("channel_name") or ("Канал" if lang == "ru" else "Channel")
+        url = _build_message_url(p)
         text = p.get("text") or (p.get("media") or {}).get("caption") or ""
         if text and len(text) > settings.TEXT_TRUNCATE_LIMIT:
             text = text[: settings.TEXT_TRUNCATE_LIMIT] + "…"
-        # Структурируем, чтобы модели было проще
         lines.append(f"- title: {title}")
         lines.append(f"  url: {url}")
         lines.append("  text: |")
@@ -109,26 +107,43 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
 
 
 def _markdown_to_html_safe(text: str) -> str:
-    """Конвертирует простые Markdown-ссылки [text](url) в <a href="url">text</a>
-    и экранирует остальной текст для безопасной отправки как HTML в Bot API.
-    Поддерживаем только http/https ссылки. Эмодзи и кириллица сохраняются.
+    """Конвертирует простые Markdown-ссылки [text](url) и жирный текст **text** в безопасный HTML.
+    Поддерживаем только http/https ссылки. Сначала заменяем ссылки и жирные сегменты плейсхолдерами,
+    затем экранируем текст целиком и восстанавливаем плейсхолдеры как HTML-теги.
     """
-    # 1) Заменим Markdown-ссылки на плейсхолдеры
     placeholders: List[str] = []
-    def repl(m: Match) -> str:
+    bold_placeholders: List[str] = []
+
+    # 1) Ссылки -> плейсхолдеры
+    def repl_link(m: Match) -> str:
         title = m.group(1)
         url = m.group(2)
-        anchor = f'<a href="{html.escape(url, quote=True)}">{html.escape(title)}</a>'
+        anchor = '<a href="{href}">{title}</a>'.format(href=html.escape(url, quote=True), title=html.escape(title))
         placeholders.append(anchor)
         return f"__LINK_PLACEHOLDER_{len(placeholders)-1}__"
 
-    pattern = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
-    tmp = pattern.sub(repl, text)
+    pattern_link = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+    tmp = pattern_link.sub(repl_link, text)
 
-    # 2) Экранируем весь текст как HTML
-    escaped = html.escape(tmp)
+    # 2) Жирный -> плейсхолдеры
+    def repl_bold(m: Match) -> str:
+        inner = m.group(1)
+        # Экранируем содержимое жирного сегмента, но оставляем плейсхолдеры как есть
+        inner_esc = html.escape(inner)
+        bold_placeholders.append(f"<b>{inner_esc}</b>")
+        return f"__BOLD_PLACEHOLDER_{len(bold_placeholders)-1}__"
 
-    # 3) Возвращаем плейсхолдеры якорями
+    pattern_bold = re.compile(r"\*\*([^*]+)\*\*")
+    tmp2 = pattern_bold.sub(repl_bold, tmp)
+
+    # 3) Экранируем оставшийся текст
+    escaped = html.escape(tmp2)
+
+    # 4) Восстанавливаем жирные сегменты
+    for i, b in enumerate(bold_placeholders):
+        escaped = escaped.replace(f"__BOLD_PLACEHOLDER_{i}__", b)
+
+    # 5) Восстанавливаем якоря-ссылки
     for i, a in enumerate(placeholders):
         escaped = escaped.replace(f"__LINK_PLACEHOLDER_{i}__", a)
 
@@ -251,6 +266,9 @@ def run_aggregation(limit: Optional[int] = None):
         logger.error("Gemini returned empty summary; aborting aggregation")
         return JSONResponse({"ok": False, "result": "gemini_failed", "error": "empty_summary"})
 
+    # Пост-обработка формата
+    summary = _postprocess_summary(summary)
+
     out_name = settings.OUTPUT_SUMMARY_FILENAME
     out_path = os.path.join(settings.OUTPUT_DIR, out_name)
     wrote_ok = _write_summary_file(out_path, summary, encoding=settings.SUMMARY_FILE_ENCODING_RUN)
@@ -277,15 +295,78 @@ def publish_now(limit: Optional[int] = None):
         logger.error("Gemini returned empty summary; aborting publish")
         return JSONResponse({"ok": False, "result": "gemini_failed", "published": False, "error": "empty_summary"})
 
+    # Пост-обработка формата
+    summary = _postprocess_summary(summary)
+
     out_path = os.path.join(settings.OUTPUT_DIR, settings.OUTPUT_SUMMARY_FILENAME)
     wrote_ok = _write_summary_file(out_path, summary, encoding=settings.SUMMARY_FILE_ENCODING_PUBLISH)
 
-    published = _publish_telegram(summary)
+    # Публикация в Telegram
+    text_to_send = summary
+    if settings.TELEGRAM_PARSE_MODE and settings.TELEGRAM_PARSE_MODE.upper() == "HTML":
+        text_to_send = _markdown_to_html_safe(summary)
+    published = _publish_telegram(text_to_send)
 
     removed: List[str] = []
-    if wrote_ok and published:
+    if published:
+        removed = _remove_approved(items)
+
+    return JSONResponse({"ok": True, "result": "ok", "published": published, "output": out_path, "removed": removed})
+
+
+def _build_message_url(payload: Dict[str, Any]) -> str:
+    username = payload.get("channel_username")
+    msg_id = payload.get("message_id")
+    chan_id = payload.get("channel_id")
+    try:
+        if username and msg_id:
+            return f"https://t.me/{username}/{msg_id}"
+        if chan_id and msg_id:
+            # Для приватных групп/каналов используем t.me/c/<short_id>/<msg_id>
+            cid = int(chan_id)
+            if cid < 0:
+                cid = -cid
+            # short id без префикса 100...
+            short_id = cid - 1000000000000 if str(cid).startswith("100") else cid
+            return f"https://t.me/c/{short_id}/{msg_id}"
+    except Exception:
+        pass
+    return ""
+
+_emoji_re = re.compile(r"^([\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u27FF])(?:\s*[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u27FF]+)*\s*(.*)$")
+_username_paren_re = re.compile(r"\s*\(@[A-Za-z0-9_]+\)")
+
+def _postprocess_summary(text: str) -> str:
+    lines = text.splitlines()
+    out: List[str] = []
+    first_in_block = True
+    for ln in lines:
+        if not ln.strip():
+            out.append(ln)
+            first_in_block = True
+            continue
+        cur = ln
+        if first_in_block:
+            # Заголовок — если это ссылка или просто текст, обернём в ** ** если не обёрнут
+            if cur.startswith("**") and cur.endswith("**"):
+                pass
+            else:
+                cur = f"**{cur}**"
+            first_in_block = False
+        else:
+            # Вторая строка: один эмодзи в начале
+            m = _emoji_re.match(cur)
+            if m:
+                cur = f"{m.group(1)} {m.group(2)}".strip()
+            # Убрать (@username) в скобках
+            cur = _username_paren_re.sub("", cur)
+        out.append(cur)
+    return "\n".join(out)
+
+    removed: List[str] = []
+    if wrote_ok:
         removed = _remove_approved(items)
     else:
-        logger.warning("Publish failed or summary not written; approved are kept")
+        logger.warning("Summary not written; approved are kept")
 
-    return JSONResponse({"ok": True, "result": "ok", "output": out_path, "removed": removed, "published": published})
+    return JSONResponse({"ok": True, "result": "ok", "output": out_path, "removed": removed})
