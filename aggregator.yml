@@ -17,8 +17,8 @@ services:
       - TELEGRAM_TIMEOUT_SEC=30
     volumes:
       - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
-    ports:
-      - "8002:8002"
+    #ports:
+    #  - "8002:8002"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
       interval: 15s

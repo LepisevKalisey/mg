@@ -143,11 +143,50 @@ class TelegramMonitor:
             logger.exception("_post_auth_start_handlers failed")
 
     def _resolve_chats_filter(self) -> List[str] | None:
-        # Возвращаем список чатов/каналов (@channel)
+        # Возвращаем нормализованный список чатов/каналов (@channel)
         if not settings.MONITORING_CHANNELS:
             logger.warning("No channels configured. Set MONITORING_CHANNELS or CHANNELS_FILE")
             return None
-        return settings.MONITORING_CHANNELS
+        return self._normalize_channels(settings.MONITORING_CHANNELS)
+
+    def _normalize_channels(self, channels: List[str]) -> List[str]:
+        """Нормализуем список каналов: убираем пустые/дубликаты, хвостовые запятые,
+        конвертируем t.me ссылки в @username."""
+        normalized: List[str] = []
+        seen = set()
+        for ch in channels:
+            s = (ch or "").strip()
+            if not s:
+                continue
+            s = s.rstrip(",;.")
+            if s.startswith("https://t.me/") or s.startswith("http://t.me/"):
+                tail = s.split("/", 3)[-1].split("?")[0]
+                if tail:
+                    if tail.startswith("+"):
+                        # Инвайт-ссылки нельзя использовать в фильтре событий
+                        continue
+                    s = f"@{tail}"
+            elif not s.startswith("@"):
+                s = f"@{s}"
+            if s not in seen:
+                normalized.append(s)
+                seen.add(s)
+        return normalized
+
+    async def _run_client(self) -> None:
+        """Фоновый запуск клиента до отключения."""
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+            await self.client.run_until_disconnected()
+        except asyncio.CancelledError:
+            logger.info("Telegram client run loop cancelled")
+            raise
+        except Exception as e:
+            logger.exception("Telegram client run loop error: %s", e)
+        finally:
+            self._started = False
+            logger.info("Telegram client run loop stopped")
 
     async def refresh_handlers(self, channels: List[str]) -> None:
         """Пере-регистрируем event handlers под новый список каналов без рестарта."""
