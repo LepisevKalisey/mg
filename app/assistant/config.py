@@ -43,7 +43,7 @@ class Settings:
         # URL Collector API (например, http://collector:8001)
         self.COLLECTOR_URL = _get_env("COLLECTOR_URL", "http://localhost:8001")
         # URL Aggregator API (опционально, если сервис существует)
-        self.AGGREGATOR_URL = _get_env("AGGREGATOR_URL", "http://mg-aggregator:8002")
+        self.AGGREGATOR_URL = _get_env("AGGREGATOR_URL", "http://aggregator:8002")
         self.AGGREGATOR_DIR = os.path.join(self.DATA_DIR, "aggregator")
         self.AGGREGATOR_CONFIG_PATH = os.path.join(self.AGGREGATOR_DIR, "config.json")
 

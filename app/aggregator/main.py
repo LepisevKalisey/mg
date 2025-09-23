@@ -74,7 +74,7 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
             "Ты — редактор дайджестов. Сформируй краткий дайджест на русском языке строго в формате Markdown для публикации в Telegram.",
             "Для каждого материала выведи РОВНО три строки:",
             "1) Первая строка — короткий заголовок как Markdown-ссылка на оригинальный пост: [Заголовок](URL). Если URL отсутствует — просто короткий заголовок без ссылки.",
-            "2) Вторая строка — ровно одно релевантное эмодзи в начале строки и отсылка к источнику: например ‘📰 Канал <ИмяКанала> (@username) сообщает, что …’ или ‘🧠 Как написали в ForbesRussia, …’ или похожее по смыслу.",
+            "2) Вторая строка — ровно одно релевантное эмодзи в начале строки и отсылка к источнику (без ссылок): например ‘📰 Канал <ИмяКанала> (@username) сообщает, что …’ или ‘🧠 Как написали в ForbesRussia, …’ или похожее по смыслу.",
             "3) Третья строка — краткое содержание сообщения (2–4 предложения).",
             "Между материалами — одна пустая строка. Не используй списки, заголовки разделов, HTML и дополнительные пояснения. Выводи только результат в Markdown.",
         ]
@@ -83,8 +83,8 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
             f"You are a digest editor. Produce a concise digest in {lang} strictly in Telegram-ready Markdown.",
             "For each item output EXACTLY three lines:",
             "1) First line — short title as a Markdown link to the original post: [Title](URL). If URL is missing — just a short title without link.",
-            "2) Second line — exactly one relevant emoji at the start and attribution to the source.",
-            "3) Third line — brief summary (1–2 sentences).",
+            "2) Second line — exactly one relevant emoji at the start and attribution to the source (without links).",
+            "3) Third line — brief summary (2–4 sentences).",
             "Separate items with a single empty line. No lists, section headers, HTML or extra explanations. Output only the Markdown result.",
         ]
     lines.append("Исходные данные по материалам (title, url, text):" if lang == "ru" else "Input items (title, url, text):")
@@ -162,11 +162,10 @@ def _publish_telegram(markdown_text: str) -> bool:
         logger.warning("Telegram publishing skipped: BOT_TOKEN or TARGET_CHANNEL_ID is not set")
         return False
     try:
-        html_text = _markdown_to_html_safe(markdown_text)
         api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
         body = {
             "chat_id": settings.TARGET_CHANNEL_ID,
-            "text": html_text,
+            "text": markdown_text,
             "disable_web_page_preview": settings.TELEGRAM_DISABLE_WEB_PREVIEW,
             "parse_mode": settings.TELEGRAM_PARSE_MODE,
         }

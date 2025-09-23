@@ -38,7 +38,7 @@ class Settings:
 
         # Настройки Telegram публикации
         self.TELEGRAM_TIMEOUT_SEC = int(_get_env("TELEGRAM_TIMEOUT_SEC", "15"))
-        self.TELEGRAM_PARSE_MODE = _get_env("TELEGRAM_PARSE_MODE", "HTML")
+        self.TELEGRAM_PARSE_MODE = _get_env("TELEGRAM_PARSE_MODE", "Markdown")
         # Отключить предпросмотр ссылок
         self.TELEGRAM_DISABLE_WEB_PREVIEW = _get_env("TELEGRAM_DISABLE_WEB_PREVIEW", "true").lower() in ("1", "true", "yes", "on")
 

@@ -585,41 +585,50 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
                 approved_count = None
 
             lines: list[str] = []
-            lines.append("Assistant: ok")
+            lines.append("Assistant:\n" + "status: ok")
             # Информация о вебхуке
             wh_info = _tg_api("getWebhookInfo", {}) or {}
             result = wh_info.get("result", {}) if isinstance(wh_info, dict) else {}
             expected_wh = (settings.SERVICE_URL.rstrip("/") + "/telegram/webhook") if settings.SERVICE_URL else None
             curr_wh = result.get("url")
-            lines.append(f"Webhook: current={curr_wh or 'none'} expected={expected_wh or 'none'}")
-            # Параметры ассистента
-            lines.append(f"Admin chat: {settings.ADMIN_CHAT_ID if settings.ADMIN_CHAT_ID is not None else 'not set'}")
-            lines.append(f"BOT_TOKEN: {'set' if bool(settings.BOT_TOKEN) else 'not set'}")
-            lines.append(f"Collector URL: {settings.COLLECTOR_URL}")
-            lines.append(f"Aggregator URL: {settings.AGGREGATOR_URL or 'not set'}")
+            lines.append(f"webhook: current={curr_wh or 'none'}; expected={expected_wh or 'none'}")
+            lines.append(f"admin_chat: {settings.ADMIN_CHAT_ID if settings.ADMIN_CHAT_ID is not None else 'not set'}")
+            lines.append(f"bot_token: {'set' if bool(settings.BOT_TOKEN) else 'not set'}")
+            lines.append(f"collector_url: {settings.COLLECTOR_URL}")
+            lines.append(f"aggregator_url: {settings.AGGREGATOR_URL or 'not set'}")
+            lines.append("")
 
             # Collector
+            lines.append("Collector:")
             if not col_status:
-                lines.append("collector: недоступен")
+                lines.append("status: недоступен")
             else:
                 st = col_status.get("status") or "unknown"
                 authorized = col_status.get("authorized")
                 channels = col_status.get("channels") or []
                 quiet = (col_status.get("quiet") or {})
-                lines.append(f"collector: {st}, authorized={authorized}, channels={len(channels)}")
+                lines.append(f"status: {st}")
+                lines.append(f"authorized: {authorized}")
+                lines.append(f"channels_count: {len(channels)}")
                 lines.append(f"quiet: manual={quiet.get('manual')} schedule={quiet.get('schedule')} now={quiet.get('quiet_now')}")
+            lines.append("")
 
             # Aggregator
+            lines.append("Aggregator:")
             if settings.AGGREGATOR_URL:
                 if not agg_status:
-                    lines.append("aggregator: недоступен")
+                    lines.append("status: недоступен")
                 else:
                     st = agg_status.get("status") or "unknown"
-                    lines.append(f"aggregator: {st}, approved_count={approved_count if approved_count is not None else 'n/a'}")
+                    lines.append(f"status: {st}")
+                    lines.append(f"approved_count: {approved_count if approved_count is not None else 'n/a'}")
                     lines.append(f"approved_dir: {agg_status.get('approved_dir')}")
                     lines.append(f"output_dir: {agg_status.get('output_dir')}")
-                # Параметры публикации
-                lines.append(f"schedule: {schedule or 'not set'}; limit: {limit or 'default'}; last_run: {last_run_date or 'never'}")
+                lines.append(f"schedule: {schedule or 'not set'}")
+                lines.append(f"limit: {limit or 'default'}")
+                lines.append(f"last_run: {last_run_date or 'never'}")
+            else:
+                lines.append("status: URL не задан")
 
             _send_message(chat_id, "\n".join(lines))
         except Exception:
