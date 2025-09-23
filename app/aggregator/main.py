@@ -155,6 +155,13 @@ def _use_gemini(prompt: str) -> str:
         return ""
 
 
+def _md_to_plain(text: str) -> str:
+    # Преобразуем Markdown-ссылки [Текст](URL) → 'Текст - URL'
+    try:
+        return re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 - \2", text)
+    except Exception:
+        return text
+
 # -------------------- Telegram publishing --------------------
 
 def _publish_telegram(markdown_text: str) -> bool:
@@ -167,8 +174,10 @@ def _publish_telegram(markdown_text: str) -> bool:
             "chat_id": settings.TARGET_CHANNEL_ID,
             "text": markdown_text,
             "disable_web_page_preview": settings.TELEGRAM_DISABLE_WEB_PREVIEW,
-            "parse_mode": settings.TELEGRAM_PARSE_MODE,
         }
+        # parse_mode добавляем только если он задан
+        if settings.TELEGRAM_PARSE_MODE:
+            body["parse_mode"] = settings.TELEGRAM_PARSE_MODE
         logger.info(
             f"Publishing to Telegram: chat_id={settings.TARGET_CHANNEL_ID} text_len={len(markdown_text)} parse_mode={settings.TELEGRAM_PARSE_MODE}"
         )
@@ -183,11 +192,34 @@ def _publish_telegram(markdown_text: str) -> bool:
                 logger.warning(f"Bot API non-200 response: {resp.status}")
             return ok
     except HTTPError as he:
+        # Пробуем прочитать тело ошибки
         try:
             err_body = he.read().decode("utf-8")
         except Exception:
             err_body = str(he)
         logger.error(f"Bot API HTTPError: {he.code} {err_body}")
+        # Если это ошибка парсинга сущностей — пробуем отправить без parse_mode и с plain-текстом
+        if he.code == 400 and "can't parse entities" in err_body.lower():
+            try:
+                plain = _md_to_plain(markdown_text)
+                body2 = {
+                    "chat_id": settings.TARGET_CHANNEL_ID,
+                    "text": plain,
+                    "disable_web_page_preview": settings.TELEGRAM_DISABLE_WEB_PREVIEW,
+                }
+                req2 = urlrequest.Request(
+                    api_url,
+                    data=json.dumps(body2, ensure_ascii=False).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urlrequest.urlopen(req2, timeout=settings.TELEGRAM_TIMEOUT_SEC) as resp2:
+                    ok2 = (resp2.status == 200)
+                    if not ok2:
+                        logger.warning(f"Retry Bot API non-200 response: {resp2.status}")
+                    return ok2
+            except Exception as e2:
+                logger.exception(f"Retry without parse_mode failed: {e2}")
+        # Иначе — обычный фолбэк
     except URLError as ue:
         logger.error(f"Bot API URLError: {ue}")
     except Exception as e:

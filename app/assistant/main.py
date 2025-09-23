@@ -324,7 +324,7 @@ def _reject(filename: str) -> bool:
 
 # --- HTTP helper для REST сервисов ---
 
-def _rest_call(method: str, url: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Optional[Dict[str, Any]]:
+def _rest_call(method: str, url: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 120) -> Optional[Dict[str, Any]]:
     try:
         data = None
         headers = {"Content-Type": "application/json"}
@@ -541,7 +541,7 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
             _send_message(chat_id, "Aggregator URL не задан, операция недоступна")
             return
         url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
-        resp = _rest_call("POST", url, {})
+        resp = _rest_call("POST", url, {}, timeout=180)
         if resp and resp.get("ok"):
             _send_message(chat_id, "Публикация запущена")
             try:

@@ -117,34 +117,13 @@ class TelegramMonitor:
         if not chats_filter:
             logger.warning("Channels list is empty. Skipping event handler registration.")
             return
-        self.client.add_event_handler(self._on_new_message, events.NewMessage(chats=chats_filter))
-        # Отдельный обработчик альбомов (media group) — будет вызван единоразово на всю группу
-        self.client.add_event_handler(self._on_new_album, events.Album(chats=chats_filter))
+        # Вместо прямой регистрации используем refresh_handlers, чтобы избежать дубликатов
+        await self.refresh_handlers(chats_filter)
 
         # Запускаем run_until_disconnected в фоне
         self._task = asyncio.create_task(self._run_client())
         self._started = True
         logger.info("Telegram monitoring started")
-
-    async def stop(self) -> None:
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-
-        if self.client.is_connected():
-            await self.client.disconnect()
-
-        self._started = False
-        logger.info("Telegram monitoring stopped")
-
-    async def _run_client(self) -> None:
-        try:
-            await self.client.run_until_disconnected()
-        except asyncio.CancelledError:
-            pass
 
     def _post_auth_start_handlers(self) -> None:
         """После успешной авторизации регистрируем обработчики и запускаем фонового клиента."""
@@ -152,8 +131,8 @@ class TelegramMonitor:
             chats_filter = self._resolve_chats_filter()
             if chats_filter:
                 try:
-                    self.client.add_event_handler(self._on_new_message, events.NewMessage(chats=chats_filter))
-                    self.client.add_event_handler(self._on_new_album, events.Album(chats=chats_filter))
+                    # Перерегистрируем обработчики асинхронно, чтобы избежать двойной регистрации
+                    asyncio.create_task(self.refresh_handlers(chats_filter))
                 except Exception:
                     logger.exception("Failed to register handlers after auth")
             if not self._task or self._task.done():
