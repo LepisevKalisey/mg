@@ -12,7 +12,7 @@ services:
       - SERVICE_URL_ASSISTANT
       - TELEGRAM_WEBHOOK_SECRET
       - ADMIN_CHAT_ID
-      - AGGREGATOR_URL
+      - AGGREGATOR_URL=http://mg-aggregator:8002
       - DATA_DIR
     volumes:
       - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
