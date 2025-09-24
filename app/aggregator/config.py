@@ -55,5 +55,8 @@ class Settings:
         # Лимит усечения текста для промпта
         self.TEXT_TRUNCATE_LIMIT = int(_get_env("AGG_TEXT_TRUNCATE_LIMIT", "4000"))
 
+        # Автодебаунс публикации (секунды ожидания перед батчевой публикацией)
+        self.DEBOUNCE_SECONDS = int(_get_env("AGG_DEBOUNCE_SECONDS", "60"))
+
 
 settings = Settings()

@@ -5,6 +5,7 @@ import logging
 import re
 import html
 from typing import List, Dict, Any, Optional, Match
+from threading import Timer, Lock
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -71,38 +72,42 @@ def _compose_prompt(items: List[Dict[str, Any]], lang: str) -> str:
     # Инструкция модели: строгий Markdown-формат для Telegram
     if lang == "ru":
         lines: List[str] = [
-            "Ты — редактор дайджестов. Сформируй краткий дайджест на русском языке строго в формате Markdown для публикации в Telegram.",
-            "Для каждого материала выведи РОВНО три строки:",
-            "1) Первая строка — короткий заголовок как жирная Markdown-ссылка на оригинальный пост: **[Заголовок](URL)**. Если URL отсутствует — просто жирный короткий заголовок без ссылки.",
-            "2) Вторая строка — ровно одно релевантное эмодзи в начале строки и отсылка к источнику БЕЗ @username: используй вариативные формулировки (например: ‘📰 Как сообщает <ИмяКанала>, …’, ‘🧠 По данным <ИмяКанала>, …’, ‘📣 В канале <ИмяКанала> отмечают, …’). Не повторяй одну и ту же фразу.",
-            "3) Третья строка — краткое содержание сообщения (2–4 предложения).",
-            "Между материалами — одна пустая строка. Не используй списки, заголовки разделов, HTML и дополнительные пояснения. Выводи только результат в Markdown.",
+            "Ты — редактор дайджестов. Сформируй один общий пост на русском языке строго в формате Markdown для публикации в Telegram.",
+            "Сгруппируй материалы по смысловым темам: если несколько материалов об одном и том же, объедини их в один блок.",
+            "Для КАЖДОГО смыслового блока выведи РОВНО три строки:",
+            "1) Первая строка — короткий заголовок как жирная Markdown-ссылка на основной первоисточник: **[Заголовок](URL)**. Если URL отсутствует — просто жирный короткий заголовок без ссылки.",
+            "2) Вторая строка — ровно одно релевантное эмодзи в начале строки и отсылки ко ВСЕМ первоисточникам (в виде Markdown-ссылок [Имя](URL) или упоминаний по названию канала без @username). Не повторяй одну и ту же фразу.",
+            "3) Третья строка — краткое интегрированное содержание (2–4 предложения) по теме блока.",
+            "Между блоками — одна пустая строка. Не используй списки, заголовки разделов, HTML и дополнительные пояснения. Выводи только результат в Markdown.",
         ]
     else:
         lines = [
-            f"You are a digest editor. Produce a concise digest in {lang} strictly in Telegram-ready Markdown.",
-            "For each item output EXACTLY three lines:",
-            "1) First line — short title as a bold Markdown link to the original post: **[Title](URL)**. If URL is missing — just a bold short title without link.",
-            "2) Second line — exactly one relevant emoji at the start and attribution to the source WITHOUT @username; vary the phrasing across items.",
-            "3) Third line — brief summary (2–4 sentences).",
-            "Separate items with a single empty line. No lists, section headers, HTML or extra explanations. Output only the Markdown result.",
+            f"You are a digest editor. Produce a single combined post in {lang} strictly in Telegram-ready Markdown.",
+            "Cluster items by topic: if several items are about the same thing, merge them into one block.",
+            "For EACH topical block output EXACTLY three lines:",
+            "1) First line — short title as a bold Markdown link to the primary source: **[Title](URL)**. If URL is missing — just a bold short title without link.",
+            "2) Second line — exactly one relevant emoji at the start and references to ALL sources (as Markdown links [Name](URL) or source names without @username). Vary the phrasing.",
+            "3) Third line — brief integrated summary (2–4 sentences) for that topic.",
+            "Separate blocks with a single empty line. No lists, section headers, HTML or extra explanations. Output only the Markdown result.",
         ]
-    lines.append("Исходные данные по материалам (title, url, text):" if lang == "ru" else "Input items (title, url, text):")
+    lines.append("Исходные данные по материалам (title, url, source, text):" if lang == "ru" else "Input items (title, url, source, text):")
     for it in items:
         p = it["payload"]
         # Берём заголовок сообщения, а не название канала
         title = p.get("title") or p.get("channel_title") or p.get("channel_name") or ("Канал" if lang == "ru" else "Channel")
         url = _build_message_url(p)
         text = p.get("text") or (p.get("media") or {}).get("caption") or ""
+        source_name = p.get("channel_title") or p.get("channel_name") or ""
         if text and len(text) > settings.TEXT_TRUNCATE_LIMIT:
             text = text[: settings.TEXT_TRUNCATE_LIMIT] + "…"
         lines.append(f"- title: {title}")
         lines.append(f"  url: {url}")
+        lines.append(f"  source: {source_name}")
         lines.append("  text: |")
         for ln in (text or "").splitlines():
             lines.append(f"    {ln}")
         lines.append("")
-    lines.append("Выведи только итоговый дайджест в Markdown по указанным правилам." if lang == "ru" else "Output only the final Markdown digest.")
+    lines.append("Выведи только итоговый пост, сгруппированный по смысловым блокам, в Markdown по указанным правилам." if lang == "ru" else "Output only the final Markdown post grouped by topical blocks.")
     return "\n".join(lines)
 
 
@@ -306,6 +311,7 @@ def health():
         "service": "aggregator",
         "approved_dir": settings.APPROVED_DIR,
         "output_dir": settings.OUTPUT_DIR,
+        "debounce_due_at": _debounce_due_at,
     })
 
 
@@ -370,10 +376,69 @@ def publish_now(limit: Optional[int] = None):
     return JSONResponse({"ok": True, "result": "ok", "published": published, "output": out_path, "removed": removed})
 
 
+# Debounce state for scheduled batch publish
+_debounce_lock = Lock()
+_debounce_timer = None
+_debounce_due_at = None  # epoch seconds or None
+
+def _debounce_fire():
+    """Timer callback to aggregate and publish approved items in one batched post."""
+    global _debounce_timer, _debounce_due_at
+    with _debounce_lock:
+        _debounce_timer = None
+        _debounce_due_at = None
+    try:
+        items = _read_approved(settings.BATCH_LIMIT)
+        if not items:
+            logger.info("Debounce fire: no approved items to publish")
+            return
+        logger.info(f"Debounce publish: items={len(items)}")
+        prompt = _compose_prompt(items, settings.SUMMARY_LANGUAGE)
+        summary = _use_gemini(prompt)
+        if not summary:
+            logger.error("Gemini returned empty summary; aborting debounce publish")
+            return
+        summary = _postprocess_summary(summary)
+        out_path = os.path.join(settings.OUTPUT_DIR, settings.OUTPUT_SUMMARY_FILENAME)
+        _ = _write_summary_file(out_path, summary, encoding=settings.SUMMARY_FILE_ENCODING_PUBLISH)
+        text_to_send = summary
+        if settings.TELEGRAM_PARSE_MODE and settings.TELEGRAM_PARSE_MODE.upper() == "HTML":
+            text_to_send = _markdown_to_html_safe(summary)
+        published = _publish_telegram(text_to_send)
+        if published:
+            _remove_approved(items)
+    except Exception:
+        logger.exception("Debounce publish failed")
+
+
+def _schedule_publish_soon(wait_sec: Optional[int] = None) -> bool:
+    """Schedule a delayed batch publish. Subsequent calls reset the timer (debounce)."""
+    global _debounce_timer, _debounce_due_at
+    delay = (wait_sec or settings.DEBOUNCE_SECONDS)
+    if delay <= 0:
+        return False
+    with _debounce_lock:
+        if _debounce_timer:
+            try:
+                _debounce_timer.cancel()
+            except Exception:
+                pass
+        _debounce_due_at = time.time() + delay
+        _debounce_timer = Timer(delay, _debounce_fire)
+        _debounce_timer.daemon = True
+        _debounce_timer.start()
+        logger.info(f"Scheduled debounce publish in {delay}s (due_at={_debounce_due_at})")
+    return True
+
 @app.post("/api/aggregator/publish_soon")
 def publish_soon(limit: Optional[int] = None):
-    # Alias to publish_now for now; can be adjusted to schedule publication differently
-    return publish_now(limit)
+    # Debounced scheduling: we ignore limit here and batch all approved at fire time
+    scheduled = _schedule_publish_soon()
+    return JSONResponse({
+        "ok": True,
+        "result": "scheduled" if scheduled else "debounce_disabled",
+        "due_at": _debounce_due_at,
+    })
 
 
 def _build_message_url(payload: Dict[str, Any]) -> str:
@@ -432,3 +497,7 @@ def _postprocess_summary(text: str) -> str:
         logger.warning("Summary not written; approved are kept")
 
     return JSONResponse({"ok": True, "result": "ok", "output": out_path, "removed": removed})
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=settings.HOST, port=settings.PORT)
