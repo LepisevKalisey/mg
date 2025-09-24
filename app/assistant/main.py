@@ -425,6 +425,11 @@ def _help_text() -> str:
         "/digest_limit <N> — ограничить число постов в дайджесте",
         "/publish_now — запустить публикацию сейчас",
         "/status — показать статусы сервисов",
+        "/autoapprove_news on|off — включить/выключить автоапрув новостей",
+        "/autoapprove_expert on|off — включить/выключить автоапрув аналитики/экспертного",
+        "/classify on|off — включить/выключить классификацию постов",
+        "/news_to_approval on|off — отправлять новости на апрув",
+        "/others_to_approval on|off — отправлять прочие посты на апрув",
     ]
     return "\n".join(lines)
 
@@ -534,6 +539,113 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
             _send_message(chat_id, "Тихие часы отключены")
         return
 
+    if cmd == "/autoapprove_news":
+        val = args.lower()
+        if val not in ("on", "off"):
+            _send_message(chat_id, "Использование: /autoapprove_news on|off")
+            return
+        # First, update Collector flags to ensure ingestion behavior matches the toggle
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/autoapprove"
+        resp = _rest_call("POST", url, {
+            "auto_publish_news": (val == "on"),
+            "send_news_to_approval": (val != "on"),
+        })
+        if not resp or not resp.get("ok"):
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        flags = resp.get("flags") or {}
+        # Then, keep aggregator config in sync
+        cfg = _load_agg_config()
+        cfg["auto_approve_news"] = (val == "on")
+        _save_agg_config(cfg)
+        # Report the effective collector flags
+        def _onoff(v: bool) -> str:
+            return "on" if v else "off"
+        f1 = _onoff(bool(flags.get("use_classify")))
+        f2 = _onoff(bool(flags.get("send_news_to_approval")))
+        f3 = _onoff(bool(flags.get("auto_publish_news")))
+        _send_message(
+            chat_id,
+            (
+                f"Автоапрув новостей: {'включен' if (val == 'on') else 'выключен'}\n"
+                f"Collector: use_classify={f1}, send_news_to_approval={f2}, auto_publish_news={f3}"
+            )
+        )
+        return
+
+    if cmd == "/autoapprove_expert":
+        val = args.lower()
+        if val not in ("on", "off"):
+            _send_message(chat_id, "Использование: /autoapprove_expert on|off")
+            return
+        cfg = _load_agg_config()
+        cfg["auto_approve_expert"] = (val == "on")
+        if _save_agg_config(cfg):
+            _send_message(chat_id, f"Автоапрув аналитики/экспертного: {'включен' if cfg['auto_approve_expert'] else 'выключен'}")
+        else:
+            _send_message(chat_id, "Не удалось сохранить конфигурацию")
+        return
+
+    if cmd == "/classify":
+        val = args.lower()
+        if val not in ("on", "off"):
+            _send_message(chat_id, "Использование: /classify on|off")
+            return
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/autoapprove"
+        resp = _rest_call("POST", url, {"use_classify": (val == "on")})
+        if not resp or not resp.get("ok"):
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        flags = resp.get("flags") or {}
+        _send_message(
+            chat_id,
+            (
+                f"Классификация: {'включена' if (val == 'on') else 'выключена'}\n"
+                f"Collector: use_classify={'on' if flags.get('use_classify') else 'off'}"
+            )
+        )
+        return
+
+    if cmd == "/news_to_approval":
+        val = args.lower()
+        if val not in ("on", "off"):
+            _send_message(chat_id, "Использование: /news_to_approval on|off")
+            return
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/autoapprove"
+        resp = _rest_call("POST", url, {"send_news_to_approval": (val == "on")})
+        if not resp or not resp.get("ok"):
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        flags = resp.get("flags") or {}
+        _send_message(
+            chat_id,
+            (
+                f"Отправка новостей на апрув: {'включена' if (val == 'on') else 'выключена'}\n"
+                f"Collector: send_news_to_approval={'on' if flags.get('send_news_to_approval') else 'off'}; auto_publish_news={'on' if flags.get('auto_publish_news') else 'off'}"
+            )
+        )
+        return
+
+    if cmd == "/others_to_approval":
+        val = args.lower()
+        if val not in ("on", "off"):
+            _send_message(chat_id, "Использование: /others_to_approval on|off")
+            return
+        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/autoapprove"
+        resp = _rest_call("POST", url, {"send_others_to_approval": (val == "on")})
+        if not resp or not resp.get("ok"):
+            _send_message(chat_id, "Ошибка: Collector недоступен")
+            return
+        flags = resp.get("flags") or {}
+        _send_message(
+            chat_id,
+            (
+                f"Отправка прочих постов на апрув: {'включена' if (val == 'on') else 'выключена'}\n"
+                f"Collector: send_others_to_approval={'on' if flags.get('send_others_to_approval') else 'off'}"
+            )
+        )
+        return
+
     if cmd == "/digest_time":
         if not args:
             _send_message(chat_id, "Использование: /digest_time <HH:MM[,HH:MM ...]>")
@@ -641,6 +753,20 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
                 lines.append(f"authorized: {authorized}")
                 lines.append(f"channels_count: {len(channels)}")
                 lines.append(f"quiet: manual={quiet.get('manual')} schedule={quiet.get('schedule')} now={quiet.get('quiet_now')}")
+                # Auto-approval/classification flags
+                try:
+                    ap = _rest_call("GET", settings.COLLECTOR_URL.rstrip("/") + "/api/collector/autoapprove")
+                    if ap and ap.get("ok"):
+                        flags = ap.get("flags") or {}
+                        lines.append(
+                            "autoapprove_flags: "
+                            f"use_classify={'on' if flags.get('use_classify') else 'off'}, "
+                            f"send_news_to_approval={'on' if flags.get('send_news_to_approval') else 'off'}, "
+                            f"send_others_to_approval={'on' if flags.get('send_others_to_approval') else 'off'}, "
+                            f"auto_publish_news={'on' if flags.get('auto_publish_news') else 'off'}"
+                        )
+                except Exception:
+                    pass
             lines.append("")
 
             # Aggregator
@@ -661,6 +787,10 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
             lines.append(f"schedules: {', '.join(schedules) if schedules else 'not set'}")
             lines.append(f"limit: {limit}")
             lines.append(f"approved_count: {approved_count}")
+            cfg_auto_news = cfg.get("auto_approve_news")
+            cfg_auto_expert = cfg.get("auto_approve_expert")
+            lines.append(f"auto_approve_news: {'on' if cfg_auto_news else 'off'}")
+            lines.append(f"auto_approve_expert: {'on' if cfg_auto_expert else 'off'}")
 
             _send_message(chat_id, "\n".join(lines))
         except Exception:

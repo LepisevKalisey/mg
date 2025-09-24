@@ -32,7 +32,7 @@ from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 
 from .config import settings
-from .storage import save_pending_message
+from .storage import save_pending_message, save_approved_message
 
 
 logger = logging.getLogger("collector.telegram")
@@ -355,96 +355,6 @@ class TelegramMonitor:
     def is_quiet_now(self) -> bool:
         return self._quiet_mode or self._is_in_quiet_schedule()
 
-    async def _on_new_message(self, event: events.NewMessage.Event) -> None:
-        try:
-            msg: Message = event.message
-            # Если это часть альбома (media group), обработаем в _on_new_album и здесь игнорируем
-            if getattr(msg, "grouped_id", None):
-                return
-
-            # Берем чат (канал)
-            chat = await event.get_chat()
-            channel_id = getattr(chat, "id", None)
-            channel_username = getattr(chat, "username", None)
-            channel_title = getattr(chat, "title", None) or channel_username or "unknown"
-
-            # Простая фильтрация рекламы/продвижения
-            if self._is_ad_or_promo(msg.message):
-                logger.info("Ad/promo detected, skipping message %s from channel '%s'", f"{channel_id}_{getattr(msg, 'id', None)}", channel_title)
-                return
-
-            # De-duplication guard
-            if self._is_duplicate_and_mark(channel_id, getattr(msg, "id", None)):
-                return
-
-            media_type = None
-            caption = None
-            if msg.media:
-                if isinstance(msg.media, MessageMediaPhoto):
-                    media_type = "photo"
-                elif isinstance(msg.media, MessageMediaDocument):
-                    media_type = "document"
-                else:
-                    media_type = "unknown"
-                caption = msg.message
-
-            # Метаданные
-            views = getattr(msg, "views", None)
-            forwards = getattr(msg, "forwards", None)
-            reactions = None
-            if getattr(msg, "reactions", None):
-                try:
-                    # Сериализуем реакции как список {emoji, count}
-                    reactions = [
-                        {"emoji": getattr(c.reaction, "emoticon", None), "count": c.count}
-                        for c in msg.reactions.results
-                    ]
-                except Exception:
-                    reactions = None
-
-            author = {}
-            if msg.sender:
-                sender = await msg.get_sender()
-                author = {
-                    "id": getattr(sender, "id", None),
-                    "username": getattr(sender, "username", None),
-                    "first_name": getattr(sender, "first_name", None),
-                    "last_name": getattr(sender, "last_name", None),
-                }
-
-            payload: Dict[str, Any] = {
-                "id": f"{channel_id}_{msg.id}",
-                "channel_id": str(channel_id),
-                "channel_name": str(channel_title),
-                "channel_username": channel_username,
-                "channel_title": channel_title,
-                "message_id": msg.id,
-                "text": msg.message,
-                "media": {
-                    "type": media_type,
-                    "file_id": None,
-                    "caption": caption,
-                } if media_type else None,
-                "author": author,
-                "timestamp": msg.date.isoformat() if msg.date else None,
-                "metadata": {
-                    "views": views,
-                    "forwards": forwards,
-                    "reactions": reactions,
-                },
-                "status": "pending",
-                "moderation": None,
-            }
-
-            path = save_pending_message(settings.PENDING_DIR, payload)
-            logger.info(f"Saved pending message: {path}")
-
-            # Отправим уведомление редакторам с кнопками (только текст, с сохранением форматирования)
-            await self._send_to_editors(payload, path, source_message=msg)
-
-        except Exception as e:
-            logger.exception(f"Failed to process message: {e}")
-
     async def _on_new_album(self, event: events.Album.Event) -> None:
         """Обрабатываем альбом (media group) как единый пост: пересылаем только текстовую часть (капшен),
         сохраняя форматирование, без дублирования по каждому медиа."""
@@ -509,10 +419,24 @@ class TelegramMonitor:
                 "moderation": None,
             }
 
-            path = save_pending_message(settings.PENDING_DIR, payload)
-            logger.info(f"Saved pending album message: {path}")
+            classification = await self._classify_post(msg.message)
+            decision = self._decide_auto_approval(classification)
 
-            await self._send_to_editors(payload, path, source_message=msg)
+            if decision.get("auto_approve"):
+                payload["status"] = "approved"
+                payload["moderation"] = {"classification": classification, "auto_approved": True}
+                path = save_approved_message(settings.APPROVED_DIR, payload)
+                logger.info(f"Saved approved album message: {path}")
+                return
+            elif decision.get("send_to_approval"):
+                payload["moderation"] = {"classification": classification, "auto_approved": False}
+                path = save_pending_message(settings.PENDING_DIR, payload)
+                logger.info(f"Saved pending album message: {path}")
+                await self._send_to_editors(payload, path, source_message=msg)
+                return
+            else:
+                logger.info("Dropping album %s after classification '%s'", payload["id"], classification)
+                return
 
         except Exception as e:
             logger.exception(f"Failed to process album: {e}")
@@ -877,14 +801,50 @@ class TelegramMonitor:
                 return True
         return False
 
+    # ---- Auto-approval and classification helpers ----
+    def _get_auto_approve_flags(self) -> Dict[str, bool]:
+        return {
+            "use_classify": bool(settings.USE_GEMINI_CLASSIFY),
+            "send_news_to_approval": bool(settings.SEND_NEWS_TO_APPROVAL),
+            "send_others_to_approval": bool(settings.SEND_OTHERS_TO_APPROVAL),
+            "auto_publish_news": bool(settings.AUTO_PUBLISH_NEWS),
+        }
+
+    async def _classify_post(self, text: Optional[str]) -> str:
+        """Return 'news' or 'other'. If classification disabled, treat as 'other'."""
+        if not settings.USE_GEMINI_CLASSIFY:
+            return "other"
+        t = (text or "").strip()
+        if not t:
+            return "other"
+        lower = t.lower()
+        keywords = [
+            "news", "breaking", "urgent", "report:", "reported",
+            "срочно", "новость", "источник", "заявил", "пресс-служба",
+        ]
+        score = sum(1 for w in keywords if w in lower)
+        if score >= 1 and len(t) > 50:
+            return "news"
+        return "other"
+
+    def _decide_auto_approval(self, classification: str) -> Dict[str, bool]:
+        f = self._get_auto_approve_flags()
+        if classification == "news":
+            auto = f["auto_publish_news"] and not f["send_news_to_approval"]
+            return {"auto_approve": auto, "send_to_approval": f["send_news_to_approval"]}
+        else:
+            return {"auto_approve": False, "send_to_approval": f["send_others_to_approval"]}
+
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:
+        """Обработка одиночного нового сообщения (не альбом)."""
         try:
             msg: Message = event.message
-            # Если это часть альбома (media group), обработаем в _on_new_album и здесь игнорируем
+            if not msg:
+                return
+            # Альбомы обрабатываются в _on_new_album
             if getattr(msg, "grouped_id", None):
                 return
 
-            # Берем чат (канал)
             chat = await event.get_chat()
             channel_id = getattr(chat, "id", None)
             channel_username = getattr(chat, "username", None)
@@ -892,23 +852,16 @@ class TelegramMonitor:
 
             # Простая фильтрация рекламы/продвижения
             if self._is_ad_or_promo(msg.message):
-                logger.info("Ad/promo detected, skipping message %s from channel '%s'", f"{channel_id}_{getattr(msg, 'id', None)}", channel_title)
+                logger.info(
+                    "Ad/promo detected, skipping message %s from channel '%s'",
+                    f"{channel_id}_{getattr(msg, 'id', None)}",
+                    channel_title,
+                )
                 return
 
-            # De-duplication guard
+            # De-duplication
             if self._is_duplicate_and_mark(channel_id, getattr(msg, "id", None)):
                 return
-
-            media_type = None
-            caption = None
-            if msg.media:
-                if isinstance(msg.media, MessageMediaPhoto):
-                    media_type = "photo"
-                elif isinstance(msg.media, MessageMediaDocument):
-                    media_type = "document"
-                else:
-                    media_type = "unknown"
-                caption = msg.message
 
             # Метаданные
             views = getattr(msg, "views", None)
@@ -916,7 +869,6 @@ class TelegramMonitor:
             reactions = None
             if getattr(msg, "reactions", None):
                 try:
-                    # Сериализуем реакции как список {emoji, count}
                     reactions = [
                         {"emoji": getattr(c.reaction, "emoticon", None), "count": c.count}
                         for c in msg.reactions.results
@@ -942,11 +894,7 @@ class TelegramMonitor:
                 "channel_title": channel_title,
                 "message_id": msg.id,
                 "text": msg.message,
-                "media": {
-                    "type": media_type,
-                    "file_id": None,
-                    "caption": caption,
-                } if media_type else None,
+                "media": None,
                 "author": author,
                 "timestamp": msg.date.isoformat() if msg.date else None,
                 "metadata": {
@@ -958,14 +906,28 @@ class TelegramMonitor:
                 "moderation": None,
             }
 
-            path = save_pending_message(settings.PENDING_DIR, payload)
-            logger.info(f"Saved pending message: {path}")
+            classification = await self._classify_post(msg.message)
+            decision = self._decide_auto_approval(classification)
 
-            # Отправим уведомление редакторам с кнопками (только текст, с сохранением форматирования)
-            await self._send_to_editors(payload, path, source_message=msg)
+            if decision.get("auto_approve"):
+                payload["status"] = "approved"
+                payload["moderation"] = {"classification": classification, "auto_approved": True}
+                path = save_approved_message(settings.APPROVED_DIR, payload)
+                logger.info(f"Saved approved message: {path}")
+                return
+            elif decision.get("send_to_approval"):
+                payload["moderation"] = {"classification": classification, "auto_approved": False}
+                path = save_pending_message(settings.PENDING_DIR, payload)
+                logger.info(f"Saved pending message: {path}")
+                await self._send_to_editors(payload, path, source_message=msg)
+                return
+            else:
+                logger.info("Dropping message %s after classification '%s'", payload["id"], classification)
+                return
 
         except Exception as e:
-            logger.exception(f"Failed to process message: {e}")
+            logger.exception(f"Failed to process new message: {e}")
+
 
     async def _on_new_album(self, event: events.Album.Event) -> None:
         """Обрабатываем альбом (media group) как единый пост: пересылаем только текстовую часть (капшен),
@@ -1043,10 +1005,24 @@ class TelegramMonitor:
                 "moderation": None,
             }
 
-            path = save_pending_message(settings.PENDING_DIR, payload)
-            logger.info(f"Saved pending album message: {path}")
+            classification = await self._classify_post(msg.message)
+            decision = self._decide_auto_approval(classification)
 
-            await self._send_to_editors(payload, path, source_message=msg)
+            if decision.get("auto_approve"):
+                payload["status"] = "approved"
+                payload["moderation"] = {"classification": classification, "auto_approved": True}
+                path = save_approved_message(settings.APPROVED_DIR, payload)
+                logger.info(f"Saved approved album message: {path}")
+                return
+            elif decision.get("send_to_approval"):
+                payload["moderation"] = {"classification": classification, "auto_approved": False}
+                path = save_pending_message(settings.PENDING_DIR, payload)
+                logger.info(f"Saved pending album message: {path}")
+                await self._send_to_editors(payload, path, source_message=msg)
+                return
+            else:
+                logger.info("Dropping album %s after classification '%s'", payload["id"], classification)
+                return
 
         except Exception as e:
             logger.exception(f"Failed to process album: {e}")
@@ -1397,11 +1373,28 @@ class TelegramMonitor:
             self._recent_set.discard(old)
         return False
 
-    async def _on_new_message(self, event: events.NewMessage.Event) -> None:
+    def _is_ad_or_promo(self, text: Optional[str]) -> bool:
+        """Грубая проверка на рекламный/партнёрский пост по ключевым словам.
+        Возвращает True, если текст содержит один из ключевых паттернов.
+        """
+        if not self._ad_filter_enabled:
+            return False
+        t = (text or "").lower()
+        if not t:
+            return False
+        for w in self._ad_filter_words:
+            if w and w in t:
+                return True
+        return False
+
+
+    async def _on_new_album(self, event: events.Album.Event) -> None:
+        """Обрабатываем альбом (media group) как единый пост: пересылаем только текстовую часть (капшен),
+        сохраняя форматирование, без дублирования по каждому медиа."""
         try:
-            msg: Message = event.message
-            # Если это часть альбома (media group), обработаем в _on_new_album и здесь игнорируем
-            if getattr(msg, "grouped_id", None):
+            msgs: List[Message] = list(event.messages) if hasattr(event, "messages") else []
+            # Игнорируем альбомы из одного элемента (во избежание дублей с NewMessage)
+            if not msgs or len(msgs) <= 1:
                 return
 
             # Берем чат (канал)
@@ -1410,24 +1403,113 @@ class TelegramMonitor:
             channel_username = getattr(chat, "username", None)
             channel_title = getattr(chat, "title", None) or channel_username or "unknown"
 
+            # Выберем "основное" сообщение для текста (обычно в одном из элементов альбома есть caption)
+            primary = None
+            non_empty = [m for m in msgs if (m.message or "").strip()]
+            if non_empty:
+                primary = max(non_empty, key=lambda m: len(m.message))
+            else:
+                primary = msgs[0]
+            msg = primary
             # Простая фильтрация рекламы/продвижения
             if self._is_ad_or_promo(msg.message):
-                logger.info("Ad/promo detected, skipping message %s from channel '%s'", f"{channel_id}_{getattr(msg, 'id', None)}", channel_title)
+                logger.info("Ad/promo detected, skipping album %s from channel '%s'", f"{channel_id}_{getattr(msg, 'id', None)}", channel_title)
                 return
 
-            # De-duplication guard
-            if self._is_duplicate_and_mark(channel_id, getattr(msg, "id", None)):
+            # De-duplication guard (используем id выбранного сообщения альбома)
+            group_id = getattr(msg, "grouped_id", None) or (getattr(msgs[0], "grouped_id", None) if msgs else None)
+            if self._is_duplicate_and_mark(channel_id, group_id):
                 return
 
-            media_type = None
-            caption = None
-            if msg.media:
-                if isinstance(msg.media, MessageMediaPhoto):
-                    media_type = "photo"
-                elif isinstance(msg.media, MessageMediaDocument):
-                    media_type = "document"
-                else:
-                    media_type = "unknown"
-                caption = msg.message
+            # Метаданные для сохранения
+            views = getattr(msg, "views", None)
+            forwards = getattr(msg, "forwards", None)
+            reactions = None
+            if getattr(msg, "reactions", None):
+                try:
+                    reactions = [
+                        {"emoji": getattr(c.reaction, "emoticon", None), "count": c.count}
+                        for c in msg.reactions.results
+                    ]
+                except Exception:
+                    reactions = None
 
-            # Метаданные
+            author = {}
+            if msg.sender:
+                sender = await msg.get_sender()
+                author = {
+                    "id": getattr(sender, "id", None),
+                    "username": getattr(sender, "username", None),
+                    "first_name": getattr(sender, "first_name", None),
+                    "last_name": getattr(sender, "last_name", None),
+                }
+
+            payload: Dict[str, Any] = {
+                "id": f"{channel_id}_{msg.id}",
+                "channel_id": str(channel_id),
+                "channel_name": str(channel_title),
+                "channel_username": channel_username,
+                "channel_title": channel_title,
+                "message_id": msg.id,
+                "text": msg.message,
+                "media": None,  # альбом не пересылаем, сохраняем только текст
+                "author": author,
+                "timestamp": msg.date.isoformat() if msg.date else None,
+                "metadata": {
+                    "views": views,
+                    "forwards": forwards,
+                    "reactions": reactions,
+                },
+                "status": "pending",
+                "moderation": None,
+            }
+
+            classification = await self._classify_post(msg.message)
+            decision = self._decide_auto_approval(classification)
+
+            if decision.get("auto_approve"):
+                payload["status"] = "approved"
+                payload["moderation"] = {"classification": classification, "auto_approved": True}
+                path = save_approved_message(settings.APPROVED_DIR, payload)
+                logger.info(f"Saved approved album message: {path}")
+                return
+            elif decision.get("send_to_approval"):
+                payload["moderation"] = {"classification": classification, "auto_approved": False}
+                path = save_pending_message(settings.PENDING_DIR, payload)
+                logger.info(f"Saved pending album message: {path}")
+                await self._send_to_editors(payload, path, source_message=msg)
+                return
+            else:
+                logger.info("Dropping album %s after classification '%s'", payload["id"], classification)
+                return
+
+        except Exception as e:
+            logger.exception(f"Failed to process album: {e}")
+
+    # ---- Formatting helpers ----
+    @staticmethod
+    def _utf16_len(s: str) -> int:
+        # Считаем длину строки в UTF-16 code units (как требует Bot API для offsets)
+        total = 0
+        for ch in s or "":
+            o = ord(ch)
+            total += 2 if o > 0xFFFF else 1
+        return total
+
+    def _map_entity(self, ent: Any) -> Optional[Dict[str, Any]]:
+        # Маппинг Telethon entity -> Bot API entity
+        if isinstance(ent, MessageEntityBold):
+            return {"type": "bold", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityItalic):
+            return {"type": "italic", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityUnderline):
+            return {"type": "underline", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityStrike):
+            return {"type": "strikethrough", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityCode):
+            return {"type": "code", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityPre):
+            d = {"type": "pre", "offset": ent.offset, "length": ent.length}
+            lang = getattr(ent, "language", None)
+            if lang:
+                d["language"] = lang

@@ -43,3 +43,24 @@ def save_pending_message(pending_dir: str, payload: Dict[str, Any]) -> str:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
     return path
+
+
+def save_approved_message(approved_dir: str, payload: Dict[str, Any]) -> str:
+    """Сохраняет сообщение сразу в папку approved с такой же схемой именования.
+    Возвращает путь к файлу.
+    """
+    ts = int(time.time())
+    ch_username = str(payload.get("channel_username") or "").strip()
+    if ch_username:
+        channel_part = _sanitize_filename(ch_username.lstrip('@'))
+    else:
+        ch_id = str(payload.get("channel_id") or "").strip()
+        channel_part = _sanitize_filename(ch_id or "unknown")
+    message_id = str(payload.get("message_id", "unknown"))
+    filename = f"{ts}_{channel_part}_{message_id}.json"
+    path = os.path.join(approved_dir, filename)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    return path

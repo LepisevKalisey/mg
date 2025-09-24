@@ -83,6 +83,17 @@ async def on_startup():
     rng = st.get("quiet_schedule")
     if isinstance(rng, str) or rng is None:
         monitor.set_quiet_schedule(rng)
+    # Load persisted auto-approval flags (if any) and apply to runtime settings
+    ap = st.get("auto_approve") if isinstance(st, dict) else None
+    if isinstance(ap, dict):
+        if "use_classify" in ap:
+            settings.USE_GEMINI_CLASSIFY = bool(ap.get("use_classify"))
+        if "send_news_to_approval" in ap:
+            settings.SEND_NEWS_TO_APPROVAL = bool(ap.get("send_news_to_approval"))
+        if "send_others_to_approval" in ap:
+            settings.SEND_OTHERS_TO_APPROVAL = bool(ap.get("send_others_to_approval"))
+        if "auto_publish_news" in ap:
+            settings.AUTO_PUBLISH_NEWS = bool(ap.get("auto_publish_news"))
     await monitor.start()
 
 
@@ -229,3 +240,53 @@ async def auth_password(payload: dict = Body(...)):
     password = (payload.get("password") or "").strip()
     ok = await monitor.submit_password(password)
     return {"ok": ok, "status": monitor.auth_status()}
+
+# ---- Auto-approval/classification controls ----
+@app.get("/api/collector/autoapprove")
+async def get_autoapprove_flags():
+    return {
+        "ok": True,
+        "flags": {
+            "use_classify": bool(settings.USE_GEMINI_CLASSIFY),
+            "send_news_to_approval": bool(settings.SEND_NEWS_TO_APPROVAL),
+            "send_others_to_approval": bool(settings.SEND_OTHERS_TO_APPROVAL),
+            "auto_publish_news": bool(settings.AUTO_PUBLISH_NEWS),
+        },
+    }
+
+@app.post("/api/collector/autoapprove")
+async def set_autoapprove_flags(payload: dict = Body(...)):
+    # Apply provided flags to runtime settings (partial updates allowed)
+    changed = {}
+    if "use_classify" in payload:
+        settings.USE_GEMINI_CLASSIFY = bool(payload.get("use_classify"))
+        changed["use_classify"] = settings.USE_GEMINI_CLASSIFY
+    if "send_news_to_approval" in payload:
+        settings.SEND_NEWS_TO_APPROVAL = bool(payload.get("send_news_to_approval"))
+        changed["send_news_to_approval"] = settings.SEND_NEWS_TO_APPROVAL
+    if "send_others_to_approval" in payload:
+        settings.SEND_OTHERS_TO_APPROVAL = bool(payload.get("send_others_to_approval"))
+        changed["send_others_to_approval"] = settings.SEND_OTHERS_TO_APPROVAL
+    if "auto_publish_news" in payload:
+        settings.AUTO_PUBLISH_NEWS = bool(payload.get("auto_publish_news"))
+        changed["auto_publish_news"] = settings.AUTO_PUBLISH_NEWS
+
+    # Persist to state file
+    st = _load_state()
+    ap = st.get("auto_approve") if isinstance(st, dict) else None
+    if not isinstance(ap, dict):
+        ap = {}
+    ap.update({
+        "use_classify": bool(settings.USE_GEMINI_CLASSIFY),
+        "send_news_to_approval": bool(settings.SEND_NEWS_TO_APPROVAL),
+        "send_others_to_approval": bool(settings.SEND_OTHERS_TO_APPROVAL),
+        "auto_publish_news": bool(settings.AUTO_PUBLISH_NEWS),
+    })
+    st["auto_approve"] = ap
+    _save_state(st)
+
+    return {
+        "ok": True,
+        "changed": changed,
+        "flags": ap,
+    }
