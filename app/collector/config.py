@@ -65,6 +65,17 @@ class Settings:
                 self.ADMIN_CHAT_ID = int(self.ADMIN_CHAT_ID)
             except Exception:
                 pass
+        # Канал публикации новостей (для мгновенной публикации переписанных новостей)
+        self.TARGET_CHANNEL_ID = _get_env("TARGET_CHANNEL_ID")
+        if self.TARGET_CHANNEL_ID:
+            try:
+                self.TARGET_CHANNEL_ID = int(self.TARGET_CHANNEL_ID)
+            except Exception:
+                pass
+
+        # Gemini config for classification
+        self.GEMINI_API_KEY = _get_env("GEMINI_API_KEY")
+        self.GEMINI_MODEL_NAME = _get_env("GEMINI_MODEL_NAME", "gemini-1.5-flash")
 
         # Channels list from file or env
         self.CHANNELS_FILE = _get_env("CHANNELS_FILE", os.path.join(self.DATA_DIR, "channels.txt"))
@@ -75,6 +86,18 @@ class Settings:
 
         # Batch size placeholder (not used yet here)
         self.BATCH_SIZE = int(_get_env("BATCH_SIZE", "10"))
+
+        # Простая фильтрация рекламных/партнёрских постов
+        # Включена по умолчанию, можно отключить AD_FILTER_ENABLED=0
+        self.AD_FILTER_ENABLED = (_get_env("AD_FILTER_ENABLED", "1") != "0")
+        # Список ключевых слов/фраз через запятую; если пусто — используются значения по умолчанию в TelegramMonitor
+        self.AD_FILTER_WORDS = self._parse_list(_get_env("AD_FILTER_WORDS", ""))
+
+        # Модерационные настройки (по умолчанию включаем классификацию и автопубликацию новостей)
+        self.USE_GEMINI_CLASSIFY = (_get_env("USE_GEMINI_CLASSIFY", "1") != "0")
+        self.SEND_NEWS_TO_APPROVAL = (_get_env("SEND_NEWS_TO_APPROVAL", "0") != "0")
+        self.SEND_OTHERS_TO_APPROVAL = (_get_env("SEND_OTHERS_TO_APPROVAL", "1") != "0")
+        self.AUTO_PUBLISH_NEWS = (_get_env("AUTO_PUBLISH_NEWS", "1") != "0")
 
     @staticmethod
     def _parse_list(value: str) -> List[str]:

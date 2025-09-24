@@ -47,5 +47,8 @@ class Settings:
         self.AGGREGATOR_DIR = os.path.join(self.DATA_DIR, "aggregator")
         self.AGGREGATOR_CONFIG_PATH = os.path.join(self.AGGREGATOR_DIR, "config.json")
 
+        # Автопубликация дайджеста после одобрения (совместимо с переменной Collector)
+        self.AUTO_PUBLISH_NEWS = (_get_env("AUTO_PUBLISH_NEWS", "1") != "0")
+
 
 settings = Settings()

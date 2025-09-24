@@ -335,6 +335,16 @@ def _approve(filename: str) -> bool:
         dst = os.path.join(settings.APPROVED_DIR, filename)
         os.replace(src, dst)
         logger.info(f"Approved: {filename}")
+        # Автопубликация после одобрения: вызываем агрегатор, если настроено
+        try:
+            if settings.AUTO_PUBLISH_NEWS and settings.AGGREGATOR_URL:
+                url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
+                resp = _rest_call("POST", url, {}, timeout=180) or {}
+                logger.info(
+                    f"Auto-publish triggered: ok={resp.get('ok')} result={resp.get('result')} published={resp.get('published')} error={resp.get('error')}"
+                )
+        except Exception:
+            logger.exception("Auto-publish on approve failed")
         return True
     except Exception:
         logger.exception("Approve failed")
