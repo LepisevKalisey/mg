@@ -50,25 +50,47 @@ async def _digest_scheduler() -> None:
             cfg = _load_agg_config()
             sched = (cfg.get("schedule") or "").strip()
             parsed = _parse_hhmm(sched) if sched else None
-            if parsed and settings.AGGREGATOR_URL:
+            now = datetime.now()
+            last_date = cfg.get("last_run_date")
+            agg_url_set = bool(settings.AGGREGATOR_URL)
+
+            if parsed and agg_url_set:
                 h, m = parsed
-                now = datetime.now()
                 target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                last_date = cfg.get("last_run_date")
-                # Если время наступило и сегодня ещё не запускали — запускаем
-                if now >= target and last_date != _now_date_str():
-                    limit = cfg.get("limit")
-                    url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
-                    if isinstance(limit, int) and limit > 0:
-                        url = f"{url}?limit={int(limit)}"
-                    logger.info(f"Scheduled publish trigger: {url}")
-                    resp = _rest_call("POST", url, {}) or {}
-                    if resp.get("ok") and resp.get("result") == "ok" and resp.get("published"):
-                        cfg["last_run_date"] = _now_date_str()
-                        _save_agg_config(cfg)
-                        logger.info("Scheduled publish finished successfully")
+                # Логируем наступление времени публикации
+                if now >= target:
+                    logger.info(
+                        f"Scheduler: publish time reached: schedule={sched}, now={now.isoformat()}, last_run_date={last_date}"
+                    )
+                    if last_date == _now_date_str():
+                        logger.info("Scheduler: already ran today, skipping trigger")
                     else:
-                        logger.warning(f"Scheduled publish failed or not published: resp={resp}")
+                        limit = cfg.get("limit")
+                        url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
+                        if isinstance(limit, int) and limit > 0:
+                            url = f"{url}?limit={int(limit)}"
+                        logger.info(f"Scheduler: triggering publish: {url}")
+                        resp = _rest_call("POST", url, {}) or {}
+                        ok = resp.get("ok")
+                        result = resp.get("result")
+                        published = resp.get("published")
+                        err = resp.get("error")
+                        removed = resp.get("removed")
+                        logger.info(
+                            f"Scheduler: publish response ok={ok} result={result} published={published} error={err} removed_count={len(removed or [])}"
+                        )
+                        if ok and result == "ok" and published:
+                            cfg["last_run_date"] = _now_date_str()
+                            _save_agg_config(cfg)
+                            logger.info("Scheduler: publish finished successfully, last_run_date updated")
+                        else:
+                            logger.warning("Scheduler: publish failed or not published")
+                # else: умышленно не логируем каждую итерацию, чтобы избежать спама
+            else:
+                if not parsed:
+                    logger.info(f"Scheduler: schedule not set or invalid: '{sched}'")
+                if not agg_url_set:
+                    logger.info("Scheduler: AGGREGATOR_URL is not set; skipping")
         except Exception:
             logger.exception("Scheduler tick error")
         await asyncio.sleep(30)
