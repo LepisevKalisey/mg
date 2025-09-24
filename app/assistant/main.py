@@ -335,13 +335,13 @@ def _approve(filename: str) -> bool:
         dst = os.path.join(settings.APPROVED_DIR, filename)
         os.replace(src, dst)
         logger.info(f"Approved: {filename}")
-        # Автопубликация после одобрения: вызываем агрегатор, если настроено
+        # Автопубликация после одобрения: вызываем агрегатор с задержкой, если настроено
         try:
             if settings.AUTO_PUBLISH_NEWS and settings.AGGREGATOR_URL:
-                url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
+                url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_soon"
                 resp = _rest_call("POST", url, {}, timeout=180) or {}
                 logger.info(
-                    f"Auto-publish triggered: ok={resp.get('ok')} result={resp.get('result')} published={resp.get('published')} error={resp.get('error')}"
+                    f"Auto-publish scheduled: ok={resp.get('ok')} result={resp.get('result')} published={resp.get('published')} error={resp.get('error')}"
                 )
         except Exception:
             logger.exception("Auto-publish on approve failed")
@@ -353,12 +353,19 @@ def _approve(filename: str) -> bool:
 
 def _reject(filename: str) -> bool:
     try:
-        src = os.path.join(settings.PENDING_DIR, filename)
-        if not os.path.exists(src):
-            return False
-        os.remove(src)
-        logger.info(f"Rejected: {filename}")
-        return True
+        # Сначала пробуем удалить из approved (отмена автоапрува)
+        approved_path = os.path.join(settings.APPROVED_DIR, filename)
+        pending_path = os.path.join(settings.PENDING_DIR, filename)
+        if os.path.exists(approved_path):
+            os.remove(approved_path)
+            logger.info(f"Rejected (removed from approved): {filename}")
+            return True
+        # Иначе удаляем из pending
+        if os.path.exists(pending_path):
+            os.remove(pending_path)
+            logger.info(f"Rejected: {filename}")
+            return True
+        return False
     except Exception:
         logger.exception("Reject failed")
         return False

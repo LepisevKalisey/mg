@@ -370,6 +370,12 @@ def publish_now(limit: Optional[int] = None):
     return JSONResponse({"ok": True, "result": "ok", "published": published, "output": out_path, "removed": removed})
 
 
+@app.post("/api/aggregator/publish_soon")
+def publish_soon(limit: Optional[int] = None):
+    # Alias to publish_now for now; can be adjusted to schedule publication differently
+    return publish_now(limit)
+
+
 def _build_message_url(payload: Dict[str, Any]) -> str:
     username = payload.get("channel_username")
     msg_id = payload.get("message_id")

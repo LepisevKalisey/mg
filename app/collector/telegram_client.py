@@ -573,6 +573,29 @@ class TelegramMonitor:
         # Собираем итоговый текст: "<title-as-link>\n\n<text-with-formatting>"
         final_text, final_entities = self._compose_title_and_text(payload, src_text, src_entities)
 
+        # Добавим метку для автоапрувленных новостей в начале сообщения
+        try:
+            moderation = payload.get("moderation") or {}
+            if moderation.get("auto_approved") and str(moderation.get("classification")).lower() == "news":
+                label = "✅ Автоапрув новостей\n"
+                shift = self._utf16_len(label)
+                final_text = label + final_text
+                shifted_entities = []
+                for e in final_entities or []:
+                    e2 = dict(e)
+                    if isinstance(e2.get("offset"), int):
+                        e2["offset"] = e2["offset"] + shift
+                    else:
+                        try:
+                            e2["offset"] = int(e2.get("offset", 0)) + shift
+                        except Exception:
+                            pass
+                    shifted_entities.append(e2)
+                final_entities = shifted_entities
+        except Exception:
+            # не прерываем отправку, если что-то пошло не так
+            pass
+
         # Подготовим кнопки
         file_name = os.path.basename(saved_path)
         reply_markup = {
@@ -1158,6 +1181,29 @@ class TelegramMonitor:
 
         # Собираем итоговый текст: "<title-as-link>\n\n<text-with-formatting>"
         final_text, final_entities = self._compose_title_and_text(payload, src_text, src_entities)
+
+        # Добавим метку для автоапрувленных новостей в начале сообщения
+        try:
+            moderation = payload.get("moderation") or {}
+            if moderation.get("auto_approved") and str(moderation.get("classification")).lower() == "news":
+                label = "✅ Автоапрув новостей\n"
+                shift = self._utf16_len(label)
+                final_text = label + final_text
+                shifted_entities = []
+                for e in final_entities or []:
+                    e2 = dict(e)
+                    if isinstance(e2.get("offset"), int):
+                        e2["offset"] = e2["offset"] + shift
+                    else:
+                        try:
+                            e2["offset"] = int(e2.get("offset", 0)) + shift
+                        except Exception:
+                            pass
+                    shifted_entities.append(e2)
+                final_entities = shifted_entities
+        except Exception:
+            # не прерываем отправку, если что-то пошло не так
+            pass
 
         # Подготовим кнопки
         file_name = os.path.basename(saved_path)
