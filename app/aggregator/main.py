@@ -202,10 +202,61 @@ def _publish_telegram(markdown_text: str) -> bool:
             headers={"Content-Type": "application/json"},
         )
         with urlrequest.urlopen(req, timeout=settings.TELEGRAM_TIMEOUT_SEC) as resp:
-            ok = (resp.status == 200)
-            if not ok:
-                logger.warning(f"Bot API non-200 response: {resp.status}")
-            return ok
+            status = resp.status
+            raw = ""
+            try:
+                raw = resp.read().decode("utf-8", errors="ignore")
+            except Exception:
+                raw = ""
+            if status != 200:
+                logger.warning(f"Bot API non-200 response: {status} body={raw[:200]}")
+                return False
+            # Парсим JSON и проверяем поле ok
+            try:
+                j = json.loads(raw)
+            except Exception:
+                j = None
+            if isinstance(j, dict):
+                if not j.get("ok", False):
+                    desc = j.get("description", "") or ""
+                    logger.error(f"Bot API returned ok=false: {desc}")
+                    # Фолбэк при ошибке парсинга сущностей
+                    if "can't parse entities" in desc.lower():
+                        try:
+                            plain = _md_to_plain(markdown_text)
+                            body2 = {
+                                "chat_id": settings.TARGET_CHANNEL_ID,
+                                "text": plain,
+                                "disable_web_page_preview": settings.TELEGRAM_DISABLE_WEB_PREVIEW,
+                            }
+                            req2 = urlrequest.Request(
+                                api_url,
+                                data=json.dumps(body2, ensure_ascii=False).encode("utf-8"),
+                                headers={"Content-Type": "application/json"},
+                            )
+                            with urlrequest.urlopen(req2, timeout=settings.TELEGRAM_TIMEOUT_SEC) as resp2:
+                                raw2 = ""
+                                try:
+                                    raw2 = resp2.read().decode("utf-8", errors="ignore")
+                                except Exception:
+                                    raw2 = ""
+                                try:
+                                    j2 = json.loads(raw2)
+                                except Exception:
+                                    j2 = None
+                                ok2 = bool(j2 and j2.get("ok", False))
+                                if not ok2:
+                                    logger.warning(f"Retry Bot API ok=false: {raw2[:200]}")
+                                return ok2
+                        except Exception as e2:
+                            logger.exception(f"Retry without parse_mode failed: {e2}")
+                    return False
+            else:
+                # Если не JSON — считаем это ошибкой
+                logger.warning(f"Bot API returned non-JSON body: {raw[:200]}")
+                return False
+            # Успех
+            return True
     except HTTPError as he:
         # Пробуем прочитать тело ошибки
         try:
@@ -228,9 +279,14 @@ def _publish_telegram(markdown_text: str) -> bool:
                     headers={"Content-Type": "application/json"},
                 )
                 with urlrequest.urlopen(req2, timeout=settings.TELEGRAM_TIMEOUT_SEC) as resp2:
-                    ok2 = (resp2.status == 200)
+                    raw2 = resp2.read().decode("utf-8", errors="ignore")
+                    try:
+                        j2 = json.loads(raw2)
+                    except Exception:
+                        j2 = None
+                    ok2 = bool(j2 and j2.get("ok", False))
                     if not ok2:
-                        logger.warning(f"Retry Bot API non-200 response: {resp2.status}")
+                        logger.warning(f"Retry Bot API ok=false: {raw2[:200]}")
                     return ok2
             except Exception as e2:
                 logger.exception(f"Retry without parse_mode failed: {e2}")
