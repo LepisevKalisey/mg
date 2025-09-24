@@ -411,6 +411,7 @@ def _help_text() -> str:
         "/quiet_schedule <HH:MM-HH:MM|off> — настроить тихие часы",
         "/digest_time <HH:MM> — установить время ежедневной публикации",
         "/digest_limit <N> — ограничить число постов в дайджесте",
+        "/digest_reset — сбросить last_run_date (разрешить публикацию сегодня)",
         "/publish_now — запустить публикацию сейчас",
         "/status — показать статусы сервисов",
     ]
@@ -548,6 +549,24 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
             _send_message(chat_id, f"Лимит постов установлен: {n}")
         else:
             _send_message(chat_id, "Не удалось сохранить конфигурацию агрегатора")
+        return
+
+    if cmd == "/digest_reset":
+        cfg = _load_agg_config()
+        if "last_run_date" in cfg:
+            try:
+                prev = cfg.get("last_run_date")
+                del cfg["last_run_date"]
+                ok = _save_agg_config(cfg)
+                if ok:
+                    _send_message(chat_id, f"Сброшено: last_run_date ({prev}) удалён. Планировщик сможет запустить публикацию сегодня.")
+                else:
+                    _send_message(chat_id, "Не удалось обновить конфигурацию агрегатора")
+            except Exception:
+                logger.exception("/digest_reset failed")
+                _send_message(chat_id, "Ошибка при сбросе last_run_date")
+        else:
+            _send_message(chat_id, "last_run_date не установлен — сбрасывать нечего")
         return
 
     if cmd == "/publish_now":
