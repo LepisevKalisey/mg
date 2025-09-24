@@ -26,6 +26,9 @@ app = FastAPI(title="MediaGenerator Assistant", version="0.3.0")
 
 # --- Ежедневный планировщик дайджеста ---
 _scheduler_task: Optional[asyncio.Task] = None
+# Гейтинг, чтобы не триггерить публикацию дважды в одну и ту же минуту
+_fired_date = None
+_fired_times: set[str] = set()
 
 
 def _now_date_str() -> str:
@@ -45,50 +48,49 @@ def _parse_hhmm(s: str) -> Optional[tuple[int, int]]:
 
 async def _digest_scheduler() -> None:
     logger.info("Scheduler started")
+    global _fired_date, _fired_times
     while True:
         try:
             cfg = _load_agg_config()
-            sched = (cfg.get("schedule") or "").strip()
-            parsed = _parse_hhmm(sched) if sched else None
-            now = datetime.now()
-            last_date = cfg.get("last_run_date")
+            # Поддержка старого формата: schedule (строка) -> schedules (list)
+            schedules = cfg.get("schedules") or ([cfg.get("schedule")] if cfg.get("schedule") else [])
+            schedules = [s.strip() for s in schedules if isinstance(s, str) and _parse_hhmm(s.strip())]
             agg_url_set = bool(settings.AGGREGATOR_URL)
 
-            if parsed and agg_url_set:
-                h, m = parsed
-                target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                # Логируем наступление времени публикации
-                if now >= target:
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
+            hhmm_now = now.strftime("%H:%M")
+
+            # Сбросим гейтинг при смене дня
+            if _fired_date != today:
+                _fired_date = today
+                _fired_times = set()
+
+            if schedules and agg_url_set:
+                if hhmm_now in schedules and hhmm_now not in _fired_times:
                     logger.info(
-                        f"Scheduler: publish time reached: schedule={sched}, now={now.isoformat()}, last_run_date={last_date}"
+                        f"Scheduler: publish time reached: schedules={schedules}, now={now.isoformat()}"
                     )
-                    if last_date == _now_date_str():
-                        logger.info("Scheduler: already ran today, skipping trigger")
-                    else:
-                        limit = cfg.get("limit")
-                        url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
-                        if isinstance(limit, int) and limit > 0:
-                            url = f"{url}?limit={int(limit)}"
-                        logger.info(f"Scheduler: triggering publish: {url}")
-                        resp = _rest_call("POST", url, {}) or {}
-                        ok = resp.get("ok")
-                        result = resp.get("result")
-                        published = resp.get("published")
-                        err = resp.get("error")
-                        removed = resp.get("removed")
-                        logger.info(
-                            f"Scheduler: publish response ok={ok} result={result} published={published} error={err} removed_count={len(removed or [])}"
-                        )
-                        if ok and result == "ok" and published:
-                            cfg["last_run_date"] = _now_date_str()
-                            _save_agg_config(cfg)
-                            logger.info("Scheduler: publish finished successfully, last_run_date updated")
-                        else:
-                            logger.warning("Scheduler: publish failed or not published")
+                    limit = cfg.get("limit")
+                    url = settings.AGGREGATOR_URL.rstrip("/") + "/api/aggregator/publish_now"
+                    if isinstance(limit, int) and limit > 0:
+                        url = f"{url}?limit={int(limit)}"
+                    logger.info(f"Scheduler: triggering publish: {url}")
+                    resp = _rest_call("POST", url, {}) or {}
+                    ok = resp.get("ok")
+                    result = resp.get("result")
+                    published = resp.get("published")
+                    err = resp.get("error")
+                    removed = resp.get("removed")
+                    logger.info(
+                        f"Scheduler: publish response ok={ok} result={result} published={published} error={err} removed_count={len(removed or [])}"
+                    )
+                    # Помечаем этот слот как отработанный, чтобы не повторять публикацию каждую секунду в эту минуту
+                    _fired_times.add(hhmm_now)
                 # else: умышленно не логируем каждую итерацию, чтобы избежать спама
             else:
-                if not parsed:
-                    logger.info(f"Scheduler: schedule not set or invalid: '{sched}'")
+                if not schedules:
+                    logger.info("Scheduler: schedules not set; skipping")
                 if not agg_url_set:
                     logger.info("Scheduler: AGGREGATOR_URL is not set; skipping")
         except Exception:
@@ -113,9 +115,10 @@ async def on_startup():
     # Логируем стартовую конфигурацию планировщика
     try:
         cfg = _load_agg_config()
+        schedules = cfg.get("schedules") or ([cfg.get("schedule")] if cfg.get("schedule") else [])
         logger.info(
-            "Scheduler config: schedule=%s, limit=%s, aggregator_url=%s",
-            cfg.get("schedule"), cfg.get("limit"), ("set" if settings.AGGREGATOR_URL else "not set"),
+            "Scheduler config: schedules=%s, limit=%s, aggregator_url=%s",
+            schedules, cfg.get("limit"), ("set" if settings.AGGREGATOR_URL else "not set"),
         )
     except Exception:
         logger.warning("Failed to load scheduler config on startup")
@@ -173,9 +176,8 @@ async def health():
         "service": "assistant",
         "webhook": result,
         "scheduler": {
-            "schedule": cfg.get("schedule"),
+            "schedules": (cfg.get("schedules") or ([cfg.get("schedule")] if cfg.get("schedule") else [])),
             "limit": cfg.get("limit"),
-            "last_run_date": cfg.get("last_run_date"),
         }
     })
 
@@ -409,9 +411,8 @@ def _help_text() -> str:
         "/list_sources — показать список источников",
         "/quiet on|off — включить/выключить тихий режим",
         "/quiet_schedule <HH:MM-HH:MM|off> — настроить тихие часы",
-        "/digest_time <HH:MM> — установить время ежедневной публикации",
+        "/digest_time <HH:MM[,HH:MM ...]> — установить время(а) публикации",
         "/digest_limit <N> — ограничить число постов в дайджесте",
-        "/digest_reset — сбросить last_run_date (разрешить публикацию сегодня)",
         "/publish_now — запустить публикацию сейчас",
         "/status — показать статусы сервисов",
     ]
@@ -524,13 +525,22 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
         return
 
     if cmd == "/digest_time":
-        if not args or not _validate_hhmm(args):
-            _send_message(chat_id, "Использование: /digest_time <HH:MM>")
+        if not args:
+            _send_message(chat_id, "Использование: /digest_time <HH:MM[,HH:MM ...]>")
             return
+        # Парсим список времён, допускаем разделители запятая/пробел
+        tokens = [t for t in args.replace(",", " ").split() if t]
+        if not tokens or any(_parse_hhmm(t) is None for t in tokens):
+            _send_message(chat_id, "Использование: /digest_time <HH:MM[,HH:MM ...]>")
+            return
+        # Нормализуем и сортируем по времени
+        uniq = sorted({t for t in (tok.strip() for tok in tokens)}, key=lambda s: (int(s.split(":")[0]), int(s.split(":")[1])))
         cfg = _load_agg_config()
-        cfg["schedule"] = args
+        cfg["schedules"] = uniq
+        # Для обратной совместимости сохраним первый элемент в поле schedule
+        cfg["schedule"] = uniq[0] if uniq else ""
         if _save_agg_config(cfg):
-            _send_message(chat_id, f"Время публикации установлено: {args}")
+            _send_message(chat_id, f"Время(а) публикации установлено: {', '.join(uniq)}")
         else:
             _send_message(chat_id, "Не удалось сохранить конфигурацию агрегатора")
         return
@@ -552,21 +562,7 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
         return
 
     if cmd == "/digest_reset":
-        cfg = _load_agg_config()
-        if "last_run_date" in cfg:
-            try:
-                prev = cfg.get("last_run_date")
-                del cfg["last_run_date"]
-                ok = _save_agg_config(cfg)
-                if ok:
-                    _send_message(chat_id, f"Сброшено: last_run_date ({prev}) удалён. Планировщик сможет запустить публикацию сегодня.")
-                else:
-                    _send_message(chat_id, "Не удалось обновить конфигурацию агрегатора")
-            except Exception:
-                logger.exception("/digest_reset failed")
-                _send_message(chat_id, "Ошибка при сбросе last_run_date")
-        else:
-            _send_message(chat_id, "last_run_date не установлен — сбрасывать нечего")
+        _send_message(chat_id, "Команда больше не используется: лимит на одну публикацию в день отключён")
         return
 
     if cmd == "/publish_now":
@@ -577,13 +573,6 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
         resp = _rest_call("POST", url, {}, timeout=180)
         if resp and resp.get("ok"):
             _send_message(chat_id, "Публикация запущена")
-            try:
-                if resp.get("published"):
-                    cfg = _load_agg_config()
-                    cfg["last_run_date"] = _now_date_str()
-                    _save_agg_config(cfg)
-            except Exception:
-                logger.warning("Failed to update last_run_date after /publish_now")
         else:
             _send_message(chat_id, "Не удалось инициировать публикацию")
         return
@@ -606,10 +595,8 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
 
             # Конфигурация агрегатора (расписание и лимиты)
             cfg = _load_agg_config()
-            schedule = cfg.get("schedule")
+            schedules = cfg.get("schedules") or ([cfg.get("schedule")] if cfg.get("schedule") else [])
             limit = cfg.get("limit")
-            last_run_date = cfg.get("last_run_date")
-
             # Подсчёт количества файлов в approved
             approved_count = None
             try:
@@ -661,9 +648,8 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
 
             # Aggregator config
             lines.append("Aggregator config:")
-            lines.append(f"schedule: {schedule}")
+            lines.append(f"schedules: {', '.join(schedules) if schedules else 'not set'}")
             lines.append(f"limit: {limit}")
-            lines.append(f"last_run_date: {last_run_date}")
             lines.append(f"approved_count: {approved_count}")
 
             _send_message(chat_id, "\n".join(lines))
