@@ -88,6 +88,16 @@ async def on_startup():
     except Exception:
         pass
 
+    # Логируем стартовую конфигурацию планировщика
+    try:
+        cfg = _load_agg_config()
+        logger.info(
+            "Scheduler config: schedule=%s, limit=%s, aggregator_url=%s",
+            cfg.get("schedule"), cfg.get("limit"), ("set" if settings.AGGREGATOR_URL else "not set"),
+        )
+    except Exception:
+        logger.warning("Failed to load scheduler config on startup")
+
     # Запускаем фоновый планировщик публикаций
     global _scheduler_task
     if _scheduler_task is None:
@@ -119,44 +129,40 @@ async def on_startup():
         if ok:
             logger.info(f"Webhook set to: {target_url}")
         else:
-            logger.warning(f"setWebhook failed: {set_res}")
+            logger.warning(f"Failed to set webhook to: {target_url}")
     else:
-        logger.info(f"Webhook already set to: {curr_url}")
+        logger.info("Webhook already configured correctly")
 
 
 @app.get("/health")
 async def health():
-    # Покажем текущие параметры и url вебхука
-    wh_info = _tg_api("getWebhookInfo", {}) or {}
-    result = wh_info.get("result", {}) if isinstance(wh_info, dict) else {}
-    curr_url = result.get("url")
+    try:
+        wh_info = _tg_api("getWebhookInfo", {}) or {}
+        result = wh_info.get("result", {}) if isinstance(wh_info, dict) else {}
+    except Exception:
+        result = {}
+    try:
+        cfg = _load_agg_config()
+    except Exception:
+        cfg = {}
     return JSONResponse({
-        "service": "assistant",
+        "ok": True,
         "status": "ok",
-        "data_dirs": {
-            "pending": settings.PENDING_DIR,
-            "approved": settings.APPROVED_DIR,
-        },
-        "webhook": {
-            "expected": (settings.SERVICE_URL.rstrip("/") + "/telegram/webhook") if settings.SERVICE_URL else None,
-            "current": curr_url,
-            "pending_update_count": result.get("pending_update_count"),
-            "ip_address": result.get("ip_address"),
-            "last_error_date": result.get("last_error_date"),
-            "last_error_message": result.get("last_error_message"),
-            "max_connections": result.get("max_connections"),
-            "allowed_updates": result.get("allowed_updates"),
+        "service": "assistant",
+        "webhook": result,
+        "scheduler": {
+            "schedule": cfg.get("schedule"),
+            "limit": cfg.get("limit"),
+            "last_run_date": cfg.get("last_run_date"),
         }
     })
 
 
 @app.get("/debug/webhook-info")
 async def debug_webhook_info():
-    info = _tg_api("getWebhookInfo", {}) or {}
-    return JSONResponse(info)
+    info = _tg_api("getWebhookInfo", {})
+    return JSONResponse(info or {"ok": False})
 
-
-# --- Вспомогательные функции ---
 
 def _tg_timeout() -> int:
     # Короткие запросы к Bot API
@@ -208,16 +214,18 @@ def _answer_callback(callback_id: Optional[str], text: str) -> None:
     _tg_api("answerCallbackQuery", {"callback_query_id": callback_id, "text": text, "show_alert": False})
 
 
-def _delete_message(chat_id: Optional[int], message_id: Optional[int]) -> None:
+def _delete_message(chat_id: Optional[int], message_id: Optional[int]) -> bool:
     if not chat_id or not message_id:
-        return
-    _tg_api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        return False
+    resp = _tg_api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+    return bool(resp and resp.get("ok"))
 
 
-def _clear_markup(chat_id: Optional[int], message_id: Optional[int]) -> None:
+def _clear_markup(chat_id: Optional[int], message_id: Optional[int]) -> bool:
     if not chat_id or not message_id:
-        return
-    _tg_api("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id, "reply_markup": {}})
+        return False
+    resp = _tg_api("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id, "reply_markup": {}})
+    return bool(resp and resp.get("ok"))
 
 
 # --- Авторизация Collector через бота ---
@@ -238,130 +246,130 @@ def _start_auth_flow(chat_id: int) -> None:
         st = _rest_call("GET", settings.COLLECTOR_URL + "/api/collector/auth/status") or {}
         phone_hint = ((st.get("status") or {}).get("phone") or None)
     except Exception:
-        pass
-    phone_line = f"\nНомер: {phone_hint}" if phone_hint else ""
+        phone_hint = None
 
-    # Если кнопка нажата не из админ-чата, подсказка
-    if settings.ADMIN_CHAT_ID and chat_id != settings.ADMIN_CHAT_ID:
-        _send_message(chat_id, "Запрос авторизации принят. Я написал инструкции в админ-чат.")
-        _send_message(settings.ADMIN_CHAT_ID, "Запрос авторизации: отправьте код из Telegram." + phone_line)
+    _AUTH_WAIT[target_chat] = "phone"
+    if phone_hint:
+        _send_message(target_chat, f"Введите телефон (например, +79991234567). Текущий: {phone_hint}")
     else:
-        _send_message(target_chat, "Запрос авторизации: отправьте код из Telegram." + phone_line)
-
-    res = _rest_call("POST", settings.COLLECTOR_URL + "/api/collector/auth/start", {"phone": None, "chat_id": target_chat}) or {}
-    if res.get("ok"):
-        _AUTH_WAIT[target_chat] = "code"
-        _send_message(target_chat, "Код отправлен. Пришлите его в ответ.")
-    else:
-        _send_message(target_chat, "Не удалось инициировать авторизацию. Проверьте номер телефона в настройках Collector.")
+        _send_message(target_chat, "Введите телефон (например, +79991234567)")
 
 
 def _handle_auth_input(chat_id: int, text: str) -> None:
-    mode = _AUTH_WAIT.get(chat_id)
-    if not mode:
+    step = _AUTH_WAIT.get(chat_id)
+    if not step:
+        _send_message(chat_id, "Нет активного процесса авторизации. Нажмите кнопку Авторизовать в боте.")
         return
-    if settings.ADMIN_CHAT_ID is not None and chat_id != settings.ADMIN_CHAT_ID:
-        return
-    if mode == "code":
-        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/auth/code"
-        resp = _rest_call("POST", url, {"code": text})
-        if not resp:
-            _send_message(chat_id, "Collector недоступен")
+
+    if step == "phone":
+        phone = text.strip()
+        res = _rest_call("POST", settings.COLLECTOR_URL + "/api/collector/auth/start", {"phone": phone}) or {}
+        if not res.get("ok"):
+            _send_message(chat_id, "Не удалось начать авторизацию. Попробуйте позже.")
             return
+        _send_message(chat_id, "Отправьте код, полученный в Telegram (или 'cancel' для отмены)")
+        _AUTH_WAIT[chat_id] = "code"
+        return
+
+    if step == "code":
+        code = text.strip()
+        if code.lower() == "cancel":
+            _AUTH_WAIT.pop(chat_id, None)
+            _send_message(chat_id, "Авторизация отменена")
+            return
+        resp = _rest_call("POST", settings.COLLECTOR_URL.rstrip("/") + "/api/collector/auth/code", {"code": code}) or {}
         result = resp.get("result") or ""
         st = resp.get("status") or {}
-        if result == "ok" and (resp.get("ok") or st.get("authorized")):
+        if resp.get("ok") or result == "ok" or (st.get("authorized")):
             _AUTH_WAIT.pop(chat_id, None)
-            _send_message(chat_id, "Авторизация выполнена")
-        elif result == "password_required" or st.get("await_password"):
+            _send_message(chat_id, "Авторизация Collector завершена")
+            return
+        if result == "password_required" or st.get("await_password"):
             _AUTH_WAIT[chat_id] = "password"
             _send_message(chat_id, "Требуется пароль 2FA. Введите пароль")
-        elif result == "error:invalid_code":
-            _send_message(chat_id, "Неверный код. Пожалуйста, проверьте и введите код ещё раз")
-        else:
-            _send_message(chat_id, f"Ошибка: {result or 'неизвестная'}. Попробуйте снова")
-    elif mode == "password":
-        url = settings.COLLECTOR_URL.rstrip("/") + "/api/collector/auth/password"
-        resp = _rest_call("POST", url, {"password": text})
-        if not resp:
-            _send_message(chat_id, "Collector недоступен")
             return
+        _send_message(chat_id, "Код неверный или истёк. Попробуйте ещё раз или 'cancel' для отмены")
+        return
+
+    if step == "password":
+        password = text.strip()
+        resp = _rest_call("POST", settings.COLLECTOR_URL.rstrip("/") + "/api/collector/auth/password", {"password": password}) or {}
         st = resp.get("status") or {}
-        if resp.get("ok") and (st.get("authorized")):
+        if resp.get("ok") or st.get("authorized"):
             _AUTH_WAIT.pop(chat_id, None)
-            _send_message(chat_id, "Авторизация выполнена")
-        else:
-            _send_message(chat_id, "Пароль не принят. Попробуйте снова")
+            _send_message(chat_id, "Авторизация Collector завершена")
+            return
+        _send_message(chat_id, "Пароль не принят. Попробуйте снова")
+        return
+
 
 def _approve(filename: str) -> bool:
-    src = os.path.join(settings.PENDING_DIR, filename)
-    dst = os.path.join(settings.APPROVED_DIR, filename)
     try:
-        if not os.path.isfile(src):
-            logger.warning(f"Approve requested but file not found: {src}")
+        src = os.path.join(settings.PENDING_DIR, filename)
+        if not os.path.exists(src):
             return False
+        dst = os.path.join(settings.APPROVED_DIR, filename)
         os.replace(src, dst)
-        logger.info(f"Approved and moved: {src} -> {dst}")
+        logger.info(f"Approved: {filename}")
         return True
     except Exception:
-        logger.exception(f"Approve failed for {filename}")
+        logger.exception("Approve failed")
         return False
 
 
 def _reject(filename: str) -> bool:
-    src = os.path.join(settings.PENDING_DIR, filename)
     try:
-        if not os.path.isfile(src):
-            logger.warning(f"Reject requested but file not found: {src}")
+        src = os.path.join(settings.PENDING_DIR, filename)
+        if not os.path.exists(src):
             return False
         os.remove(src)
-        logger.info(f"Rejected and removed: {src}")
+        logger.info(f"Rejected: {filename}")
         return True
     except Exception:
-        logger.exception(f"Reject failed for {filename}")
+        logger.exception("Reject failed")
         return False
 
-
-# --- HTTP helper для REST сервисов ---
 
 def _rest_call(method: str, url: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 120) -> Optional[Dict[str, Any]]:
     try:
         data = None
         headers = {"Content-Type": "application/json"}
-        if payload is not None:
-            data = json.dumps(payload).encode("utf-8")
+        if method.upper() in ("POST", "PUT", "PATCH"):
+            data = json.dumps(payload or {}).encode("utf-8")
         req = urlrequest.Request(url, data=data, headers=headers, method=method.upper())
         with urlrequest.urlopen(req, timeout=timeout) as resp:
-            txt = resp.read().decode("utf-8")
-            return json.loads(txt)
+            text = resp.read().decode("utf-8")
+            try:
+                return json.loads(text)
+            except Exception:
+                logger.warning(f"REST call returned non-JSON: {text[:200]}")
+                return None
     except HTTPError as he:
         try:
-            err_body = he.read().decode("utf-8")
+            t = he.read().decode("utf-8")
         except Exception:
-            err_body = str(he)
-        logger.warning(f"REST {method} {url} failed: {he.code} {err_body}")
+            t = str(he)
+        logger.warning(f"REST HTTPError: {method} {url} -> {he.code} {t}")
+    except URLError as ue:
+        logger.warning(f"REST URLError: {method} {url} -> {ue}")
     except Exception:
-        logger.warning(f"REST {method} {url} failed", exc_info=True)
+        logger.exception(f"REST error: {method} {url}")
     return None
 
 
-# --- Конфиг агрегатора ---
-
 def _load_agg_config() -> Dict[str, Any]:
     try:
-        if os.path.isfile(settings.AGGREGATOR_CONFIG_PATH):
-            with open(settings.AGGREGATOR_CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
+        if not os.path.exists(settings.AGGREGATOR_CONFIG_PATH):
+            return {}
+        with open(settings.AGGREGATOR_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        logger.exception("Failed to read aggregator config")
-    return {}
+        logger.warning("Failed to read aggregator config; using defaults")
+        return {}
 
 
 def _save_agg_config(cfg: Dict[str, Any]) -> bool:
     try:
-        os.makedirs(os.path.dirname(settings.AGGREGATOR_CONFIG_PATH), exist_ok=True)
         with open(settings.AGGREGATOR_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         return True
@@ -370,41 +378,25 @@ def _save_agg_config(cfg: Dict[str, Any]) -> bool:
         return False
 
 
-# --- Команды бота ---
-
 def _help_text() -> str:
-    return (
-        "Доступные команды:\n"
-        "\n"
-        "Источники (Collector):\n"
-        "/add_source <@channel|t.me/link> — добавить источник\n"
-        "/remove_source <@channel|t.me/link> — удалить источник\n"
-        "/list_sources — показать текущий список\n"
-        "\n"
-        "Тихие часы (уведомления редакторам без звука):\n"
-        "/quiet on|off — включить/выключить тихий режим\n"
-        "/quiet_schedule <HH:MM-HH:MM|off> — задать интервал или отключить\n"
-        "\n"
-        "Дайджест (Aggregator):\n"
-        "/digest_time <HH:MM> — время ежедневной публикации\n"
-        "/digest_limit <N> — лимит постов в выпуске\n"
-        "/publish_now — принудительно опубликовать сейчас\n"
-        "\n"
-        "/status — статус микросервисов\n"
-        "/help — эта справка\n"
-    )
+    lines = [
+        "Доступные команды:",
+        "/help — показать справку",
+        "/add_source <@channel|t.me/link> — добавить источник",
+        "/remove_source <@channel|t.me/link> — удалить источник",
+        "/list_sources — показать список источников",
+        "/quiet on|off — включить/выключить тихий режим",
+        "/quiet_schedule <HH:MM-HH:MM|off> — настроить тихие часы",
+        "/digest_time <HH:MM> — установить время ежедневной публикации",
+        "/digest_limit <N> — ограничить число постов в дайджесте",
+        "/publish_now — запустить публикацию сейчас",
+        "/status — показать статусы сервисов",
+    ]
+    return "\n".join(lines)
 
 
 def _validate_hhmm(s: str) -> bool:
-    parts = s.split(":")
-    if len(parts) != 2:
-        return False
-    try:
-        hh = int(parts[0])
-        mm = int(parts[1])
-        return 0 <= hh <= 23 and 0 <= mm <= 59
-    except Exception:
-        return False
+    return _parse_hhmm((s or "").strip()) is not None
 
 
 def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
@@ -621,22 +613,23 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
                 else:
                     st = agg_status.get("status") or "unknown"
                     lines.append(f"status: {st}")
-                    lines.append(f"approved_count: {approved_count if approved_count is not None else 'n/a'}")
-                    lines.append(f"approved_dir: {agg_status.get('approved_dir')}")
                     lines.append(f"output_dir: {agg_status.get('output_dir')}")
-                lines.append(f"schedule: {schedule or 'not set'}")
-                lines.append(f"limit: {limit or 'default'}")
-                lines.append(f"last_run: {last_run_date or 'never'}")
             else:
-                lines.append("status: URL не задан")
+                lines.append("status: не сконфигурирован (AGGREGATOR_URL not set)")
+            lines.append("")
+
+            # Aggregator config
+            lines.append("Aggregator config:")
+            lines.append(f"schedule: {schedule}")
+            lines.append(f"limit: {limit}")
+            lines.append(f"last_run_date: {last_run_date}")
+            lines.append(f"approved_count: {approved_count}")
 
             _send_message(chat_id, "\n".join(lines))
         except Exception:
             logger.exception("/status handler failed")
+            _send_message(chat_id, "Не удалось получить статус")
         return
-
-    # Неизвестная команда
-    _send_message(chat_id, "Неизвестная команда. Введите /help")
 
 
 # --- Webhook endpoint ---
@@ -681,7 +674,9 @@ async def telegram_webhook(request: Request):
         # Авторизация Collector
         if data == "auth:start":
             _answer_callback(cb_id, "Запускаю авторизацию")
-            _clear_markup(chat_id, msg_id)
+            # Сначала пробуем удалить сообщение; если не удалось — только тогда чистим клавиатуру
+            if not _delete_message(chat_id, msg_id):
+                _clear_markup(chat_id, msg_id)
             target_chat = settings.ADMIN_CHAT_ID or chat_id
             if settings.ADMIN_CHAT_ID and chat_id != settings.ADMIN_CHAT_ID:
                 _send_message(settings.ADMIN_CHAT_ID, "Запрос авторизации: отправьте код из Telegram.")
@@ -703,10 +698,9 @@ async def telegram_webhook(request: Request):
         # Ответим нажатию
         _answer_callback(cb_id, result_text)
 
-        # По требованию: удаляем сообщение после нажатия
-        _delete_message(chat_id, msg_id)
-        # На случай отсутствия прав на удаление — уберём клавиатуру
-        _clear_markup(chat_id, msg_id)
+        # По требованию: удаляем сообщение после нажатия; если удалить нельзя — убираем клавиатуру
+        if not _delete_message(chat_id, msg_id):
+            _clear_markup(chat_id, msg_id)
 
         return JSONResponse({"ok": True})
 
@@ -720,20 +714,21 @@ async def telegram_webhook(request: Request):
         if text.startswith("/"):
             _handle_command(chat_id, msg_id, text)
         else:
-            # Обрабатываем ввод кода/пароля для авторизации Collector
+            # Обрабатываем ввод для авторизации Collector
             _handle_auth_input(chat_id, text)
-        return JSONResponse({"ok": True})
 
-    # Остальные типы апдейтов игнорируем
     return JSONResponse({"ok": True})
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
     global _scheduler_task
-    if _scheduler_task:
-        _scheduler_task.cancel()
+    if _scheduler_task is not None:
         try:
-            await _scheduler_task
+            _scheduler_task.cancel()
         except Exception:
             pass
+    try:
+        await asyncio.sleep(0.05)
+    except Exception:
+        pass
