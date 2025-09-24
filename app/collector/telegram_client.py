@@ -5,6 +5,7 @@ import json
 from typing import Any, Dict, Optional, List, Tuple
 from urllib import request as urlrequest
 from urllib.error import URLError, HTTPError
+from collections import deque
 
 from telethon import TelegramClient, events
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
@@ -87,6 +88,11 @@ class TelegramMonitor:
         self._await_code: bool = False
         self._await_password: bool = False
         self._auth_chat_id: Optional[int] = None
+
+        # De-duplication of processed posts (channel_id + message_id)
+        self._recent_keys: deque[str] = deque()
+        self._recent_set: set[str] = set()
+        self._recent_max: int = 1000
 
     @property
     def authorized(self) -> bool:
@@ -350,6 +356,10 @@ class TelegramMonitor:
             channel_username = getattr(chat, "username", None)
             channel_title = getattr(chat, "title", None) or channel_username or "unknown"
 
+            # De-duplication guard
+            if self._is_duplicate_and_mark(channel_id, getattr(msg, "id", None)):
+                return
+
             media_type = None
             caption = None
             if msg.media:
@@ -423,7 +433,8 @@ class TelegramMonitor:
         сохраняя форматирование, без дублирования по каждому медиа."""
         try:
             msgs: List[Message] = list(event.messages) if hasattr(event, "messages") else []
-            if not msgs:
+            # Игнорируем альбомы из одного элемента (во избежание дублей с NewMessage)
+            if not msgs or len(msgs) <= 1:
                 return
 
             # Берем чат (канал)
@@ -441,6 +452,523 @@ class TelegramMonitor:
                 primary = msgs[0]
 
             msg = primary
+
+            # De-duplication guard: используем уникальный идентификатор альбома (grouped_id),
+            # чтобы не отправлять повторно, если Telethon доставит событие Album несколько раз
+            group_id = getattr(msg, "grouped_id", None) or (getattr(msgs[0], "grouped_id", None) if msgs else None)
+            if self._is_duplicate_and_mark(channel_id, group_id):
+                return
+
+            # Метаданные для сохранения
+            views = getattr(msg, "views", None)
+            forwards = getattr(msg, "forwards", None)
+            reactions = None
+            if getattr(msg, "reactions", None):
+                try:
+                    reactions = [
+                        {"emoji": getattr(c.reaction, "emoticon", None), "count": c.count}
+                        for c in msg.reactions.results
+                    ]
+                except Exception:
+                    reactions = None
+
+            author = {}
+            if msg.sender:
+                sender = await msg.get_sender()
+                author = {
+                    "id": getattr(sender, "id", None),
+                    "username": getattr(sender, "username", None),
+                    "first_name": getattr(sender, "first_name", None),
+                    "last_name": getattr(sender, "last_name", None),
+                }
+
+            payload: Dict[str, Any] = {
+                "id": f"{channel_id}_{msg.id}",
+                "channel_id": str(channel_id),
+                "channel_name": str(channel_title),
+                "channel_username": channel_username,
+                "channel_title": channel_title,
+                "message_id": msg.id,
+                "text": msg.message,
+                "media": None,  # альбом не пересылаем, сохраняем только текст
+                "author": author,
+                "timestamp": msg.date.isoformat() if msg.date else None,
+                "metadata": {
+                    "views": views,
+                    "forwards": forwards,
+                    "reactions": reactions,
+                },
+                "status": "pending",
+                "moderation": None,
+            }
+
+            path = save_pending_message(settings.PENDING_DIR, payload)
+            logger.info(f"Saved pending album message: {path}")
+
+            await self._send_to_editors(payload, path, source_message=msg)
+
+        except Exception as e:
+            logger.exception(f"Failed to process album: {e}")
+
+    # ---- Formatting helpers ----
+    @staticmethod
+    def _utf16_len(s: str) -> int:
+        # Считаем длину строки в UTF-16 code units (как требует Bot API для offsets)
+        total = 0
+        for ch in s or "":
+            o = ord(ch)
+            total += 2 if o > 0xFFFF else 1
+        return total
+
+    def _map_entity(self, ent: Any) -> Optional[Dict[str, Any]]:
+        # Маппинг Telethon entity -> Bot API entity
+        if isinstance(ent, MessageEntityBold):
+            return {"type": "bold", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityItalic):
+            return {"type": "italic", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityUnderline):
+            return {"type": "underline", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityStrike):
+            return {"type": "strikethrough", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityCode):
+            return {"type": "code", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityPre):
+            d = {"type": "pre", "offset": ent.offset, "length": ent.length}
+            lang = getattr(ent, "language", None)
+            if lang:
+                d["language"] = lang
+            return d
+        if isinstance(ent, MessageEntityTextUrl):
+            return {"type": "text_link", "offset": ent.offset, "length": ent.length, "url": ent.url}
+        if isinstance(ent, MessageEntityUrl):
+            return {"type": "url", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityMention):
+            return {"type": "mention", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityHashtag):
+            return {"type": "hashtag", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityCashtag):
+            return {"type": "cashtag", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityBotCommand):
+            return {"type": "bot_command", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityEmail):
+            return {"type": "email", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityPhone):
+            return {"type": "phone_number", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntitySpoiler):
+            return {"type": "spoiler", "offset": ent.offset, "length": ent.length}
+        if isinstance(ent, MessageEntityBlockquote):
+            return {"type": "blockquote", "offset": ent.offset, "length": ent.length}
+        # Прочие не маппим
+        return None
+
+    def _extract_text_and_entities(self, msg: Message) -> Tuple[str, List[Dict[str, Any]]]:
+        text = msg.message or ""
+        entities = getattr(msg, "entities", None) or []
+        bot_entities: List[Dict[str, Any]] = []
+        for ent in entities:
+            mapped = self._map_entity(ent)
+            if mapped:
+                bot_entities.append(mapped)
+        return text, bot_entities
+
+    def _compose_title_and_text(self, payload: Dict[str, Any], text: str, entities: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+        title = payload.get("channel_title") or payload.get("channel_name") or "Канал"
+        username = payload.get("channel_username")
+        msg_id = payload.get("message_id")
+        post_url = f"https://t.me/{username}/{msg_id}" if username else None
+
+        # Базовая строка — название канала (как ссылка, если возможно)
+        full_text = title
+        out_entities: List[Dict[str, Any]] = []
+        title_utf16 = self._utf16_len(title)
+        if post_url:
+            out_entities.append({
+                "type": "text_link",
+                "offset": 0,
+                "length": title_utf16,
+                "url": post_url,
+            })
+
+        if text:
+            # Добавим пустую строку и сам текст
+            prefix = f"{title}\n\n"
+            full_text = prefix + text
+            shift = self._utf16_len(prefix)
+            for e in entities:
+                e2 = dict(e)
+                e2["offset"] = e2["offset"] + shift
+                out_entities.append(e2)
+        else:
+            # Только заголовок
+            full_text = title if not username else title  # уже учли ссылку через entity выше
+
+        return full_text, out_entities
+
+    def _build_editor_text(self, payload: Dict[str, Any]) -> str:
+        # Больше не используется для отправки, но оставляем для совместимости вызовов, если где-то останется
+        title = payload.get("channel_title") or payload.get("channel_name") or "Канал"
+        username = payload.get("channel_username")
+        msg_id = payload.get("message_id")
+        url = None
+        if username:
+            url = f"https://t.me/{username}/{msg_id}"
+        text = payload.get("text") or (payload.get("media") or {}).get("caption") or "(без текста)"
+        excerpt = (text[:900] + "…") if len(text) > 900 else text
+
+        parts = [f"<b>Новый пост</b>", f"Канал: {('@'+username) if username else title}"]
+        if url:
+            parts.append(f"Ссылка: <a href=\"{url}\">открыть в Telegram</a>")
+        parts.append("")
+        parts.append(self._escape_html(excerpt))
+        return "\n".join(parts)
+
+    @staticmethod
+    def _escape_html(text: str) -> str:
+        return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    async def _send_to_editors(self, payload: Dict[str, Any], saved_path: str, *, source_message: Optional[Message] = None, text_override: Optional[str] = None, entities_override: Optional[List[Dict[str, Any]]] = None) -> None:
+        if not settings.BOT_TOKEN or not settings.EDITORS_CHANNEL_ID:
+            logger.warning("BOT_TOKEN or EDITORS_CHANNEL_ID not configured. Skipping send to editors.")
+            return
+
+        # Исходный текст и entities из сообщения (или переданные явно)
+        if text_override is not None and entities_override is not None:
+            src_text, src_entities = text_override, entities_override
+        elif source_message is not None:
+            src_text, src_entities = self._extract_text_and_entities(source_message)
+        else:
+            src_text, src_entities = payload.get("text") or "", []
+
+        # Собираем итоговый текст: "<title-as-link>\n\n<text-with-formatting>"
+        final_text, final_entities = self._compose_title_and_text(payload, src_text, src_entities)
+
+        # Подготовим кнопки
+        file_name = os.path.basename(saved_path)
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Ok", "callback_data": f"approve:{file_name}"},
+                    {"text": "❌ Отмена", "callback_data": f"reject:{file_name}"},
+                ]
+            ]
+        }
+
+        body = {
+            "chat_id": settings.EDITORS_CHANNEL_ID,
+            "text": final_text,
+            "entities": final_entities,
+            "disable_web_page_preview": True,
+            "reply_markup": reply_markup,
+        }
+
+        # Тихие часы: отправляем без уведомлений
+        try:
+            if self.is_quiet_now():
+                body["disable_notification"] = True
+        except Exception:
+            pass
+
+        api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
+
+        def _post_json(url: str, data: Dict[str, Any]) -> None:
+            try:
+                req = urlrequest.Request(url, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
+                with urlrequest.urlopen(req, timeout=10) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Bot API non-200 response: {resp.status}")
+            except HTTPError as he:
+                try:
+                    err_body = he.read().decode("utf-8")
+                except Exception:
+                    err_body = str(he)
+                logger.error(f"Bot API HTTPError: {he.code} {err_body}")
+            except URLError as ue:
+                logger.error(f"Bot API URLError: {ue}")
+            except Exception as e:
+                logger.exception(f"Bot API request failed: {e}")
+
+        # Не блокируем event loop
+        await asyncio.to_thread(_post_json, api_url, body)
+
+    # Уведомляет в канал редакторов, что требуется авторизация, с кнопкой запуска.
+    async def notify_auth_required(self) -> None:
+        """Уведомляет в чат бота/админа, что требуется авторизация, с кнопкой запуска."""
+        if not settings.BOT_TOKEN or not settings.ADMIN_CHAT_ID:
+            logger.warning("BOT_TOKEN or ADMIN_CHAT_ID not configured. Skipping auth notification.")
+            return
+        # Определяем номер телефона для контекста уведомления
+        phone_hint = getattr(self, "_auth_phone", None) or (settings.PHONE_NUMBER or "не указан")
+        text = (
+            "❗ Требуется авторизация MTProto аккаунта для коллектора.\n"
+            f"Номер: {phone_hint}\n"
+            "Нажмите кнопку ниже, затем пришлите код из SMS/звонка в ответном сообщении."
+        )
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔐 Авторизоваться", "callback_data": "auth:start"}
+                ]
+            ]
+        }
+        body = {
+            "chat_id": settings.ADMIN_CHAT_ID,
+            "text": text,
+            "disable_web_page_preview": True,
+            "reply_markup": reply_markup,
+        }
+        api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
+
+        def _post_json(url: str, data: Dict[str, Any]) -> None:
+            try:
+                req = urlrequest.Request(url, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
+                with urlrequest.urlopen(req, timeout=10) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Bot API non-200 response: {resp.status}")
+            except HTTPError as he:
+                try:
+                    err_body = he.read().decode("utf-8")
+                except Exception:
+                    err_body = str(he)
+                logger.error(f"Bot API HTTPError: {he.code} {err_body}")
+            except URLError as ue:
+                logger.error(f"Bot API URLError: {ue}")
+            except Exception as e:
+                logger.exception(f"Bot API request failed: {e}")
+
+        await asyncio.to_thread(_post_json, api_url, body)
+
+    def auth_status(self) -> Dict[str, Any]:
+        return {
+            "authorized": self._authorized,
+            "awaiting_code": self._await_code,
+            "awaiting_password": self._await_password,
+            "phone": self._auth_phone,
+            "chat_id": self._auth_chat_id,
+        }
+
+    async def start_auth(self, phone: Optional[str], chat_id: Optional[int] = None) -> bool:
+        """Старт авторизации: отправляет код на номер телефона.
+        Если phone не задан — берём settings.PHONE_NUMBER. Сохраняем chat_id, чтобы ожидать ввод в нужном чате.
+        """
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+            # Если уже авторизованы — ничего не делаем
+            self._authorized = await self.client.is_user_authorized()
+            if self._authorized:
+                self._await_code = False
+                self._await_password = False
+                return True
+
+            # Выбираем номер телефона
+            phone_num = (phone or settings.PHONE_NUMBER or '').strip()
+            if not phone_num:
+                logger.error("PHONE_NUMBER not provided and settings.PHONE_NUMBER is empty")
+                return False
+            self._auth_phone = phone_num
+            self._auth_chat_id = chat_id
+            # Запрашиваем код
+            res = await self.client.send_code_request(phone_num)
+            # Telethon возвращает структуру с phone_code_hash
+            try:
+                self._auth_hash = getattr(res, 'phone_code_hash', None)
+            except Exception:
+                self._auth_hash = None
+            self._await_code = True
+            self._await_password = False
+            logger.info("Auth code requested for %s", phone_num)
+            return True
+        except Exception as e:
+            logger.exception("start_auth failed: %s", e)
+            return False
+
+    async def submit_code(self, code: str) -> str:
+        """Принимает код из SMS/звонка и завершает вход, либо включает режим запроса 2FA пароля.
+        Возвращает: 'ok' | 'password_required' | 'error:<msg>'
+        """
+        code = (code or '').strip()
+        if not code:
+            return "error:empty_code"
+        if not self._await_code or not self._auth_phone:
+            return "error:not_waiting_code"
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+            try:
+                await self.client.sign_in(phone=self._auth_phone, code=code)
+            except SessionPasswordNeededError:
+                # Нужен 2FA пароль
+                self._await_password = True
+                self._await_code = False
+                logger.info("2FA password required for %s", self._auth_phone)
+                return "password_required"
+            except PhoneCodeInvalidError:
+                logger.warning("Invalid phone code entered for %s", self._auth_phone)
+                return "error:invalid_code"
+            # Успешная авторизация
+            self._authorized = await self.client.is_user_authorized()
+            self._await_code = False
+            self._await_password = False
+            logger.info("Authorized after code for %s: %s", self._auth_phone, self._authorized)
+            if self._authorized:
+                self._post_auth_start_handlers()
+            return "ok" if self._authorized else "error:not_authorized"
+        except Exception as e:
+            logger.exception("submit_code failed: %s", e)
+            return f"error:{str(e)}"
+
+    async def submit_password(self, password: str) -> bool:
+        """Ввод 2FA пароля, завершение авторизации."""
+        password = (password or '').strip()
+        if not password:
+            return False
+        if not self._await_password:
+            return False
+        try:
+            if not self.client.is_connected():
+                await self.client.connect()
+            await self.client.sign_in(password=password)
+            self._authorized = await self.client.is_user_authorized()
+            self._await_password = False
+            self._await_code = False
+            logger.info("Authorized after 2FA password for %s: %s", self._auth_phone, self._authorized)
+            if self._authorized:
+                self._post_auth_start_handlers()
+            return self._authorized
+        except Exception as e:
+            logger.exception("submit_password failed: %s", e)
+            return False
+
+    def _is_duplicate_and_mark(self, channel_id: Optional[int], message_id: Optional[int]) -> bool:
+        """Return True if (channel_id,message_id) was already processed recently; otherwise mark it.
+        Keeps a sliding window of last self._recent_max keys.
+        """
+        if channel_id is None or message_id is None:
+            return False
+        key = f"{channel_id}_{message_id}"
+        if key in self._recent_set:
+            logger.debug("Duplicate detected, skipping send to editors: %s", key)
+            return True
+        self._recent_set.add(key)
+        self._recent_keys.append(key)
+        if len(self._recent_keys) > self._recent_max:
+            old = self._recent_keys.popleft()
+            self._recent_set.discard(old)
+        return False
+
+    async def _on_new_message(self, event: events.NewMessage.Event) -> None:
+        try:
+            msg: Message = event.message
+            # Если это часть альбома (media group), обработаем в _on_new_album и здесь игнорируем
+            if getattr(msg, "grouped_id", None):
+                return
+
+            # Берем чат (канал)
+            chat = await event.get_chat()
+            channel_id = getattr(chat, "id", None)
+            channel_username = getattr(chat, "username", None)
+            channel_title = getattr(chat, "title", None) or channel_username or "unknown"
+
+            # De-duplication guard
+            if self._is_duplicate_and_mark(channel_id, getattr(msg, "id", None)):
+                return
+
+            media_type = None
+            caption = None
+            if msg.media:
+                if isinstance(msg.media, MessageMediaPhoto):
+                    media_type = "photo"
+                elif isinstance(msg.media, MessageMediaDocument):
+                    media_type = "document"
+                else:
+                    media_type = "unknown"
+                caption = msg.message
+
+            # Метаданные
+            views = getattr(msg, "views", None)
+            forwards = getattr(msg, "forwards", None)
+            reactions = None
+            if getattr(msg, "reactions", None):
+                try:
+                    # Сериализуем реакции как список {emoji, count}
+                    reactions = [
+                        {"emoji": getattr(c.reaction, "emoticon", None), "count": c.count}
+                        for c in msg.reactions.results
+                    ]
+                except Exception:
+                    reactions = None
+
+            author = {}
+            if msg.sender:
+                sender = await msg.get_sender()
+                author = {
+                    "id": getattr(sender, "id", None),
+                    "username": getattr(sender, "username", None),
+                    "first_name": getattr(sender, "first_name", None),
+                    "last_name": getattr(sender, "last_name", None),
+                }
+
+            payload: Dict[str, Any] = {
+                "id": f"{channel_id}_{msg.id}",
+                "channel_id": str(channel_id),
+                "channel_name": str(channel_title),
+                "channel_username": channel_username,
+                "channel_title": channel_title,
+                "message_id": msg.id,
+                "text": msg.message,
+                "media": {
+                    "type": media_type,
+                    "file_id": None,
+                    "caption": caption,
+                } if media_type else None,
+                "author": author,
+                "timestamp": msg.date.isoformat() if msg.date else None,
+                "metadata": {
+                    "views": views,
+                    "forwards": forwards,
+                    "reactions": reactions,
+                },
+                "status": "pending",
+                "moderation": None,
+            }
+
+            path = save_pending_message(settings.PENDING_DIR, payload)
+            logger.info(f"Saved pending message: {path}")
+
+            # Отправим уведомление редакторам с кнопками (только текст, с сохранением форматирования)
+            await self._send_to_editors(payload, path, source_message=msg)
+
+        except Exception as e:
+            logger.exception(f"Failed to process message: {e}")
+
+    async def _on_new_album(self, event: events.Album.Event) -> None:
+        """Обрабатываем альбом (media group) как единый пост: пересылаем только текстовую часть (капшен),
+        сохраняя форматирование, без дублирования по каждому медиа."""
+        try:
+            msgs: List[Message] = list(event.messages) if hasattr(event, "messages") else []
+            # Игнорируем альбомы из одного элемента (во избежание дублей с NewMessage)
+            if not msgs or len(msgs) <= 1:
+                return
+
+            # Берем чат (канал)
+            chat = await event.get_chat()
+            channel_id = getattr(chat, "id", None)
+            channel_username = getattr(chat, "username", None)
+            channel_title = getattr(chat, "title", None) or channel_username or "unknown"
+
+            # Выберем "основное" сообщение для текста (обычно в одном из элементов альбома есть caption)
+            primary = None
+            non_empty = [m for m in msgs if (m.message or "").strip()]
+            if non_empty:
+                primary = max(non_empty, key=lambda m: len(m.message))
+            else:
+                primary = msgs[0]
+
+            msg = primary
+
+            # De-duplication guard (используем id выбранного сообщения альбома)
+            if self._is_duplicate_and_mark(channel_id, getattr(msg, "id", None)):
+                return
 
             # Метаданные для сохранения
             views = getattr(msg, "views", None)
