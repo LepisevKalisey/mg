@@ -302,6 +302,65 @@ def _publish_telegram(markdown_text: str) -> bool:
         logger.exception(f"Bot API request failed: {e}")
     return False
 
+# Добавлено: безопасное разбиение длинного дайджеста на части для Telegram
+def _split_for_telegram(text: str, max_chars: int) -> List[str]:
+    blocks = [b for b in text.split("\n\n") if b.strip() != ""]
+    parts: List[str] = []
+    cur_lines: List[str] = []
+    cur_len = 0
+    for b in blocks:
+        blines = b.split("\n")
+        btext = "\n".join(blines)
+        sep = 2 if cur_lines else 0
+        if cur_len + sep + len(btext) <= max_chars:
+            if sep:
+                cur_lines.append("")
+            cur_lines.extend(blines)
+            cur_len = len("\n".join(cur_lines))
+            continue
+        if cur_lines:
+            parts.append("\n".join(cur_lines))
+            cur_lines = []
+            cur_len = 0
+        # split the oversized block by lines
+        chunk: List[str] = []
+        chunk_len = 0
+        for ln in blines:
+            add_len = (1 if chunk else 0) + len(ln)
+            if chunk_len + add_len > max_chars:
+                parts.append("\n".join(chunk))
+                chunk = [ln]
+                chunk_len = len(ln)
+            else:
+                if chunk:
+                    chunk.append(ln)
+                    chunk_len += 1 + len(ln)
+                else:
+                    chunk = [ln]
+                    chunk_len = len(ln)
+        if chunk:
+            parts.append("\n".join(chunk))
+    if cur_lines:
+        parts.append("\n".join(cur_lines))
+    return parts
+
+def _publish_telegram_chunked(markdown_text: str) -> bool:
+    max_len = getattr(settings, "TELEGRAM_MAX_MESSAGE_CHARS", 4096)
+    parts = _split_for_telegram(markdown_text, max_len)
+    total = len(parts)
+    all_ok = True
+    for idx, part in enumerate(parts, start=1):
+        to_send = part
+        if settings.TELEGRAM_PARSE_MODE and settings.TELEGRAM_PARSE_MODE.upper() == "HTML":
+            to_send = _markdown_to_html_safe(part)
+        logger.info(f"Publishing chunk {idx}/{total}: len={len(to_send)}")
+        ok = _publish_telegram(to_send)
+        if not ok:
+            all_ok = False
+            logger.warning(f"Failed to publish chunk {idx}/{total}")
+        time.sleep(0.3)
+    return all_ok
+
 
 @app.get("/health")
 def health():
@@ -363,11 +422,8 @@ def publish_now(limit: Optional[int] = None):
     out_path = os.path.join(settings.OUTPUT_DIR, settings.OUTPUT_SUMMARY_FILENAME)
     wrote_ok = _write_summary_file(out_path, summary, encoding=settings.SUMMARY_FILE_ENCODING_PUBLISH)
 
-    # Публикация в Telegram
-    text_to_send = summary
-    if settings.TELEGRAM_PARSE_MODE and settings.TELEGRAM_PARSE_MODE.upper() == "HTML":
-        text_to_send = _markdown_to_html_safe(summary)
-    published = _publish_telegram(text_to_send)
+    # Публикация в Telegram (с автоматическим разбиением на части)
+    published = _publish_telegram_chunked(summary)
 
     removed: List[str] = []
     if published:
@@ -401,10 +457,8 @@ def _debounce_fire():
         summary = _postprocess_summary(summary)
         out_path = os.path.join(settings.OUTPUT_DIR, settings.OUTPUT_SUMMARY_FILENAME)
         _ = _write_summary_file(out_path, summary, encoding=settings.SUMMARY_FILE_ENCODING_PUBLISH)
-        text_to_send = summary
-        if settings.TELEGRAM_PARSE_MODE and settings.TELEGRAM_PARSE_MODE.upper() == "HTML":
-            text_to_send = _markdown_to_html_safe(summary)
-        published = _publish_telegram(text_to_send)
+        # Публикация в Telegram (с автоматическим разбиением на части)
+        published = _publish_telegram_chunked(summary)
         if published:
             _remove_approved(items)
     except Exception:

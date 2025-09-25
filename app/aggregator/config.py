@@ -41,6 +41,8 @@ class Settings:
         self.TELEGRAM_PARSE_MODE = _get_env("TELEGRAM_PARSE_MODE", "Markdown")
         # Отключить предпросмотр ссылок
         self.TELEGRAM_DISABLE_WEB_PREVIEW = _get_env("TELEGRAM_DISABLE_WEB_PREVIEW", "true").lower() in ("1", "true", "yes", "on")
+        # Максимальная длина сообщения Telegram (официальный лимит 4096 символов)
+        self.TELEGRAM_MAX_MESSAGE_CHARS = int(_get_env("TELEGRAM_MAX_MESSAGE_CHARS", "4096"))
 
         # Максимальный размер батча для саммари
         self.BATCH_LIMIT = int(_get_env("AGG_BATCH_LIMIT", "50"))

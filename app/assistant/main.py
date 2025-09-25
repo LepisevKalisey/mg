@@ -218,8 +218,16 @@ def _tg_api(method: str, body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
             text = he.read().decode("utf-8")
             logger.warning(f"Bot API HTTPError: method={method}, status={he.code}, body={text}")
+            # Попробуем распарсить тело ошибки как JSON и вернуть его,
+            # чтобы вызывающий код мог выполнить fallback.
+            try:
+                data = json.loads(text)
+                return data
+            except Exception:
+                pass
         except Exception:
             logger.warning(f"Bot API HTTPError: method={method}, status={he.code}")
+        return None
     except URLError as ue:
         logger.warning(f"Bot API URLError: method={method}, err={ue}")
     except Exception:
@@ -237,7 +245,11 @@ def _send_message(chat_id: int, text: str, reply_to_message_id: Optional[int] = 
     if reply_to_message_id:
         body["reply_to_message_id"] = reply_to_message_id
         body["allow_sending_without_reply"] = True
-    _tg_api("sendMessage", body)
+    resp = _tg_api("sendMessage", body)
+    # Fallback: если Markdown сломал парсинг сущностей, отправляем как обычный текст без parse_mode
+    if isinstance(resp, dict) and not resp.get("ok") and isinstance(resp.get("description"), str) and "can't parse entities" in resp.get("description"):
+        body.pop("parse_mode", None)
+        _tg_api("sendMessage", body)
 
 
 def _answer_callback(callback_id: Optional[str], text: str) -> None:
