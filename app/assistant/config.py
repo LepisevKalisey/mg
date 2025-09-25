@@ -54,7 +54,13 @@ class Settings:
         self.PUBLISHER_URL = _get_env("PUBLISHER_URL", "http://publisher:8006")
         self.AGGREGATOR_DIR = os.path.join(self.DATA_DIR, "aggregator")
         self.AGGREGATOR_CONFIG_PATH = os.path.join(self.AGGREGATOR_DIR, "config.json")
-
+        
+        # Policy Engine (YAML)
+        self.POLICY_DIR = os.path.join(self.DATA_DIR, "policy")
+        self.POLICY_CONFIG_PATH = os.path.join(self.POLICY_DIR, "policy.yml")
+        # Локальная временная зона для тихих часов
+        self.TIMEZONE = _get_env("TIMEZONE", "Asia/Almaty")
+        
         # Автопубликация дайджеста после одобрения (совместимо с переменной Collector)
         self.AUTO_PUBLISH_NEWS = (_get_env("AUTO_PUBLISH_NEWS", "1") != "0")
 

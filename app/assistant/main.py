@@ -18,6 +18,7 @@ if os.path.exists(ENV_PATH):
     load_dotenv(ENV_PATH)
 
 from .config import settings
+from .policy_engine import load_policy, save_policy, decide
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 logger = logging.getLogger("assistant.main")
@@ -105,6 +106,38 @@ async def on_startup():
     os.makedirs(settings.APPROVED_DIR, exist_ok=True)
     # Директория конфигурации агрегатора
     os.makedirs(os.path.dirname(settings.AGGREGATOR_CONFIG_PATH), exist_ok=True)
+    # Директория политики
+    os.makedirs(settings.POLICY_DIR, exist_ok=True)
+    # Если нет файла политики — создадим базовый шаблон
+    try:
+        from .policy_engine import save_policy
+        if not os.path.exists(settings.POLICY_CONFIG_PATH):
+            base_cfg = {
+                "policy": {
+                    "hard_drop_tags": ["ads", "partner", "promo", "sales", "poll", "digest", "question"],
+                    "source_weights": {"default": 1.0},
+                    "news": {
+                        "autoapprove": True,
+                        "forward_to_editors": True,
+                        "debounce_window_sec": 60,
+                        "undo_window_sec": 180,
+                        "quiet_hours": {"enabled": True, "start": "22:00", "end": "08:00", "notify_silently": True},
+                    },
+                    "expert": {
+                        "autoapprove": True,
+                        "forward_to_editors": True,
+                        "topics": ["Экономика", "Политика", "Налоги", "Бизнес", "Технологии"],
+                        "digest_slots_local": ["10:00", "14:00", "20:00"],
+                        "per_topic_limits": {"default_max_items": 7},
+                        "undo_window_sec": 600,
+                    },
+                    "dedup": {"method": "hybrid", "cluster_ttl_hours": 48, "publish_merge_sources": True},
+                    "limits": {"max_posts_per_minute": 30, "max_digest_length_chars": 4000},
+                }
+            }
+            save_policy(base_cfg)
+    except Exception:
+        logger.warning("Failed to init default policy config")
     logger.info("Assistant service started (webhook mode)")
     # Логируем версию сервиса при запуске
     try:
@@ -972,3 +1005,36 @@ async def telegram_webhook(request: Request):
             _handle_auth_input(chat_id, text)
 
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/policy/config")
+async def get_policy_config():
+    try:
+        cfg = load_policy()
+        return JSONResponse({"ok": True, "config": cfg})
+    except Exception:
+        return JSONResponse({"ok": False, "error": "failed_to_load"}, status_code=500)
+
+
+@app.put("/api/policy/config")
+async def put_policy_config(request: Request):
+    try:
+        payload = await request.json()
+        cfg = payload if isinstance(payload, dict) else {}
+        ok = save_policy(cfg)
+        return JSONResponse({"ok": ok})
+    except Exception:
+        return JSONResponse({"ok": False, "error": "failed_to_save"}, status_code=500)
+
+
+@app.post("/api/policy/decide")
+async def policy_decide(request: Request):
+    try:
+        post = await request.json()
+        if not isinstance(post, dict):
+            return JSONResponse({"ok": False, "error": "bad_payload"}, status_code=400)
+        decision = decide(post)
+        return JSONResponse({"ok": True, "decision": decision})
+    except Exception:
+        logger.exception("policy_decide error")
+        return JSONResponse({"ok": False, "error": "exception"}, status_code=500)

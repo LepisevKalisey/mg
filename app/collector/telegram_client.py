@@ -595,6 +595,10 @@ class TelegramMonitor:
             moderation = payload.get("moderation") or {}
             if moderation.get("auto_approved") and str(moderation.get("classification")).lower() == "news":
                 prefixes.append("✅ Автоапрув новостей")
+            # Добавим явную метку классификации
+            cls = str(moderation.get("classification") or "").lower()
+            if cls:
+                prefixes.append(f"🏷 Классификация: {'Новости' if cls == 'news' else 'Другое'}")
             topics = payload.get("topics") or []
             if topics:
                 prefixes.append("🔖 Теги: " + " ".join(topics))
@@ -902,10 +906,12 @@ class TelegramMonitor:
 
     def _decide_auto_approval(self, classification: str) -> Dict[str, bool]:
         f = self._get_auto_approve_flags()
-        if classification in ("news", "other"):
+        cls = (classification or "").lower()
+        if cls == "news":
             auto = f["auto_publish_news"] and not f["send_news_to_approval"]
             return {"auto_approve": auto, "send_to_approval": f["send_news_to_approval"]}
         else:
+            # Любая не-новость идёт в ручное утверждение согласно настройке для "other"
             return {"auto_approve": False, "send_to_approval": f["send_others_to_approval"]}
 
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:

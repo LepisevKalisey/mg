@@ -3,4 +3,5 @@ uvicorn
 python-dotenv
 telethon
 google-generativeai
+PyYAML
 # Added for classifier service (no new external libs beyond FastAPI/uvicorn)
