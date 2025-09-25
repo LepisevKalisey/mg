@@ -807,10 +807,12 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
             if not collector_status:
                 lines.append("status: недоступен")
             else:
-                lines.append("status: ok")
-                lines.append(f"authorized: {authorized}")
-                lines.append(f"channels_count: {len(channels)}")
-                lines.append(f"quiet: manual={quiet.get('manual')} schedule={quiet.get('schedule')} now={quiet.get('quiet_now')}")
+                lines.append(f"status: {collector_status.get('status') or 'unknown'}")
+                lines.append(f"authorized: {collector_status.get('authorized')}")
+                chs = collector_status.get('channels') or []
+                lines.append(f"channels_count: {len(chs)}")
+                q = collector_status.get('quiet') or {}
+                lines.append(f"quiet: manual={q.get('manual')} schedule={q.get('schedule')} now={q.get('quiet_now')}")
                 try:
                     ap = _rest_call("GET", settings.COLLECTOR_URL.rstrip("/") + "/api/collector/autoapprove")
                     if ap and ap.get("ok"):
