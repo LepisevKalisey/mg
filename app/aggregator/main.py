@@ -432,13 +432,48 @@ def _schedule_publish_soon(wait_sec: Optional[int] = None) -> bool:
 
 @app.post("/api/aggregator/publish_soon")
 def publish_soon(limit: Optional[int] = None):
-    # Debounced scheduling: we ignore limit here and batch all approved at fire time
-    scheduled = _schedule_publish_soon()
-    return JSONResponse({
-        "ok": True,
-        "result": "scheduled" if scheduled else "debounce_disabled",
-        "due_at": _debounce_due_at,
-    })
+    # Проксируем вызов в Scheduler, собираем approved как элементы
+    items = _read_approved(settings.BATCH_LIMIT)
+    simple_items = []
+    for it in items:
+        p = it.get("payload") or {}
+        simple_items.append({
+            "id": p.get("id") or it.get("path"),
+            "title": p.get("title") or "",
+            "text": p.get("text") or "",
+            "url": p.get("url") or "",
+            "source": p.get("channel_title") or p.get("channel_name") or "",
+            "created_at": p.get("created_at") or None,
+        })
+    try:
+        # Если SCHEDULER_URL задан, вызываем его publish_soon
+        if settings.SCHEDULER_URL:
+            url = settings.SCHEDULER_URL.rstrip("/") + "/api/scheduler/publish_soon"
+            payload = {"channel_id": (settings.TARGET_CHANNEL_ID or "default"), "items": simple_items, "wait_sec": settings.DEBOUNCE_SECONDS}
+            from urllib import request as urlrequest
+            import json
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req = urlrequest.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+            with urlrequest.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+                j = json.loads(raw)
+                return JSONResponse({
+                    "ok": True,
+                    "result": "proxied",
+                    "scheduled_for": j.get("scheduled_for"),
+                    "batch_key": j.get("batch_key"),
+                })
+        else:
+            # Фолбэк: если нет SCHEDULER_URL, используем локальный _schedule_publish_soon
+            scheduled = _schedule_publish_soon()
+            return JSONResponse({
+                "ok": True,
+                "result": "scheduled" if scheduled else "debounce_disabled",
+                "due_at": _debounce_due_at,
+            })
+    except Exception:
+        logger.exception("Proxy to scheduler failed")
+        return JSONResponse({"ok": False, "error": "scheduler_failed"})
 
 
 def _build_message_url(payload: Dict[str, Any]) -> str:

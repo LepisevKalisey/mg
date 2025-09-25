@@ -44,6 +44,10 @@ class Settings:
         self.COLLECTOR_URL = _get_env("COLLECTOR_URL", "http://localhost:8001")
         # URL Aggregator API (опционально, если сервис существует)
         self.AGGREGATOR_URL = _get_env("AGGREGATOR_URL", "http://aggregator:8002")
+        # URL Scheduler API (опционально, если сервис существует)
+        self.SCHEDULER_URL = _get_env("SCHEDULER_URL", "http://scheduler:8004")
+        # URL Classifier API (опционально, если сервис существует)
+        self.ASSISTANT_CLASSIFIER_URL = _get_env("CLASSIFIER_URL", "http://classifier:8003")
         self.AGGREGATOR_DIR = os.path.join(self.DATA_DIR, "aggregator")
         self.AGGREGATOR_CONFIG_PATH = os.path.join(self.AGGREGATOR_DIR, "config.json")
 

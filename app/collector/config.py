@@ -77,6 +77,9 @@ class Settings:
         self.GEMINI_API_KEY = _get_env("GEMINI_API_KEY")
         self.GEMINI_MODEL_NAME = _get_env("GEMINI_MODEL_NAME", "gemini-1.5-flash")
 
+        # External classifier service URL
+        self.CLASSIFIER_URL = _get_env("CLASSIFIER_URL", "http://classifier:8003")
+
         # Channels list from file or env
         self.CHANNELS_FILE = _get_env("CHANNELS_FILE", os.path.join(self.DATA_DIR, "channels.txt"))
         file_channels = _read_lines_file(self.CHANNELS_FILE)

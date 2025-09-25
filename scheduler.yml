@@ -1,0 +1,31 @@
+services:
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "app.scheduler.main:app", "--host", "0.0.0.0", "--port", "8004"]
+    restart: unless-stopped
+    environment:
+      - SCHEDULER_HOST=0.0.0.0
+      - SCHEDULER_PORT=8004
+      - DATA_DIR=/app/data
+      - DEBOUNCE_SECONDS=60
+      - SUMMARIZER_URL=http://summarizer:8005
+      - PUBLISHER_URL=http://publisher:8006
+    volumes:
+      - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8004/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      mg_net:
+        aliases:
+          - scheduler
+
+networks:
+  mg_net:
+    external: true
+    name: mg_net

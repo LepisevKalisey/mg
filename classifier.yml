@@ -1,0 +1,31 @@
+services:
+  classifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "app.classifier.main:app", "--host", "0.0.0.0", "--port", "8003"]
+    restart: unless-stopped
+    environment:
+      - CLASSIFIER_HOST=0.0.0.0
+      - CLASSIFIER_PORT=8003
+      - DATA_DIR=/app/data
+    volumes:
+      - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
+    # Do not publish port; reachable within mg_net as "classifier:8003"
+    # ports:
+    #   - "8003:8003"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8003/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      mg_net:
+        aliases:
+          - classifier
+
+networks:
+  mg_net:
+    external: true
+    name: mg_net

@@ -19,6 +19,7 @@ services:
       - CHANNELS_FILE
       - MONITORING_CHANNELS
       - BATCH_SIZE
+      - CLASSIFIER_URL=http://classifier:8003
     volumes:
       - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
     healthcheck:

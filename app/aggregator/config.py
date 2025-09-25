@@ -57,6 +57,8 @@ class Settings:
 
         # Автодебаунс публикации (секунды ожидания перед батчевой публикацией)
         self.DEBOUNCE_SECONDS = int(_get_env("AGG_DEBOUNCE_SECONDS", "60"))
+        # URL Scheduler API (новый сервис для дебаунса)
+        self.SCHEDULER_URL = _get_env("SCHEDULER_URL", "http://scheduler:8004")
 
 
 settings = Settings()

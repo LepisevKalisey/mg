@@ -13,7 +13,9 @@ services:
       - TELEGRAM_WEBHOOK_SECRET
       - ADMIN_CHAT_ID
       - AGGREGATOR_URL=http://mg-aggregator:8002
+      - SCHEDULER_URL=http://scheduler:8004
       - DATA_DIR
+      - CLASSIFIER_URL=http://classifier:8003
     volumes:
       - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
     ports:

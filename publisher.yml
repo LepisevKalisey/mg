@@ -1,0 +1,33 @@
+services:
+  publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "app.publisher.main:app", "--host", "0.0.0.0", "--port", "8006"]
+    restart: unless-stopped
+    environment:
+      - PUBLISHER_HOST=0.0.0.0
+      - PUBLISHER_PORT=8006
+      - DATA_DIR=/app/data
+      - BOT_TOKEN=${BOT_TOKEN}
+      - TARGET_CHANNEL_ID=${TARGET_CHANNEL_ID}
+      - TELEGRAM_TIMEOUT_SEC=30
+      - TELEGRAM_PARSE_MODE=Markdown
+      - TELEGRAM_DISABLE_WEB_PREVIEW=true
+    volumes:
+      - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8006/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      mg_net:
+        aliases:
+          - publisher
+
+networks:
+  mg_net:
+    external: true
+    name: mg_net

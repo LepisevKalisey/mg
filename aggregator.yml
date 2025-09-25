@@ -15,6 +15,7 @@ services:
       - AGG_LANG=ru
       - TELEGRAM_PARSE_MODE=
       - TELEGRAM_TIMEOUT_SEC=30
+      - SCHEDULER_URL=http://scheduler:8004
     volumes:
       - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
     #ports:

@@ -2,14 +2,19 @@ import os
 from telethon.sync import TelegramClient
 
 # Read API credentials from environment
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH")
+#API_ID = int(os.environ.get("API_ID", "0"))
+#API_HASH = os.environ.get("API_HASH")
+API_ID=23905873
+API_HASH='b7e4242c20df906337c07f2e59cebdbe'
+PHONE_NUMBER=+77073492959
+SESSION_DIR=''
+
 
 if not API_ID or not API_HASH:
     raise ValueError("API_ID and API_HASH must be set in environment variables")
 
 # Use the same session location as the collector: mtproto.session in this folder
-SESSION_DIR = os.path.dirname(os.path.abspath(__file__))
+#SESSION_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_PATH = os.path.join(SESSION_DIR, "mtproto")
 
 print(f"Using session: {SESSION_PATH}.session, exists={os.path.exists(SESSION_PATH + '.session')}")

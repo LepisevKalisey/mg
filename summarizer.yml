@@ -1,0 +1,32 @@
+services:
+  summarizer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "app.summarizer.main:app", "--host", "0.0.0.0", "--port", "8005"]
+    restart: unless-stopped
+    environment:
+      - SUMMARIZER_HOST=0.0.0.0
+      - SUMMARIZER_PORT=8005
+      - DATA_DIR=/app/data
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL_NAME=gemini-1.5-flash
+      - SUMMARY_LANGUAGE=ru
+      - TEXT_TRUNCATE_LIMIT=4000
+    volumes:
+      - ${HOST_DATA_DIR:-/home/extdrv/mg/}:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8005/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      mg_net:
+        aliases:
+          - summarizer
+
+networks:
+  mg_net:
+    external: true
+    name: mg_net

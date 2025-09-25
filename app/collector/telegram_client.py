@@ -840,6 +840,34 @@ class TelegramMonitor:
         t = (text or "").strip()
         if not t:
             return "other"
+        # Try external classifier first
+        try:
+            base = (settings.CLASSIFIER_URL or "").rstrip("/")
+            if base:
+                url = base + "/api/classifier/classify"
+                payload = {"text": t}
+                req = urlrequest.Request(
+                    url,
+                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urlrequest.urlopen(req, timeout=5) as resp:
+                    status = getattr(resp, "status", 200)
+                    body = resp.read().decode("utf-8")
+                if status == 200:
+                    try:
+                        data = json.loads(body)
+                    except Exception:
+                        data = None
+                    if isinstance(data, dict) and data.get("ok") is True:
+                        return "news" if bool(data.get("is_news")) else "other"
+        except HTTPError as he:
+            logger.warning(f"Classifier HTTPError: {he.code}")
+        except URLError as ue:
+            logger.warning(f"Classifier URLError: {ue}")
+        except Exception as e:
+            logger.warning(f"Classifier call failed: {e}")
+        # Fallback to local heuristic
         lower = t.lower()
         keywords = [
             "news", "breaking", "urgent", "report:", "reported",
