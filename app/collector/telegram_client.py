@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import json
+import re
 from typing import Any, Dict, Optional, List, Tuple
 from urllib import request as urlrequest
 from urllib.error import URLError, HTTPError
@@ -399,6 +400,20 @@ class TelegramMonitor:
                     "last_name": getattr(sender, "last_name", None),
                 }
 
+            # Extract topics from caption
+            topics: List[str] = []
+            try:
+                t = msg.message or ""
+                if t:
+                    seen = set()
+                    for m in re.finditer(r"(?<!\w)#([\w\d_А-Яа-яЁё]+)", t, flags=re.UNICODE):
+                        tag = "#" + m.group(1)
+                        if tag not in seen:
+                            seen.add(tag)
+                            topics.append(tag)
+            except Exception:
+                topics = []
+
             payload: Dict[str, Any] = {
                 "id": f"{channel_id}_{msg.id}",
                 "channel_id": str(channel_id),
@@ -415,6 +430,7 @@ class TelegramMonitor:
                     "forwards": forwards,
                     "reactions": reactions,
                 },
+                "topics": topics,
                 "status": "pending",
                 "moderation": None,
             }
@@ -573,13 +589,19 @@ class TelegramMonitor:
         # Собираем итоговый текст: "<title-as-link>\n\n<text-with-formatting>"
         final_text, final_entities = self._compose_title_and_text(payload, src_text, src_entities)
 
-        # Добавим метку для автоапрувленных новостей в начале сообщения
+        # Префиксы: автоапрув и темы (теги)
         try:
+            prefixes: List[str] = []
             moderation = payload.get("moderation") or {}
             if moderation.get("auto_approved") and str(moderation.get("classification")).lower() == "news":
-                label = "✅ Автоапрув новостей\n"
-                shift = self._utf16_len(label)
-                final_text = label + final_text
+                prefixes.append("✅ Автоапрув новостей")
+            topics = payload.get("topics") or []
+            if topics:
+                prefixes.append("🔖 Теги: " + " ".join(topics))
+            if prefixes:
+                prefix_text = "\n".join(prefixes) + "\n"
+                shift = self._utf16_len(prefix_text)
+                final_text = prefix_text + final_text
                 shifted_entities = []
                 for e in final_entities or []:
                     e2 = dict(e)
@@ -880,7 +902,7 @@ class TelegramMonitor:
 
     def _decide_auto_approval(self, classification: str) -> Dict[str, bool]:
         f = self._get_auto_approve_flags()
-        if classification == "news":
+        if classification in ("news", "other"):
             auto = f["auto_publish_news"] and not f["send_news_to_approval"]
             return {"auto_approve": auto, "send_to_approval": f["send_news_to_approval"]}
         else:
@@ -937,6 +959,20 @@ class TelegramMonitor:
                     "last_name": getattr(sender, "last_name", None),
                 }
 
+            # Extract topics (hashtags) from message text
+            topics: List[str] = []
+            try:
+                t = msg.message or ""
+                if t:
+                    seen = set()
+                    for m in re.finditer(r"(?<!\w)#([\w\d_А-Яа-яЁё]+)", t, flags=re.UNICODE):
+                        tag = "#" + m.group(1)
+                        if tag not in seen:
+                            seen.add(tag)
+                            topics.append(tag)
+            except Exception:
+                topics = []
+
             payload: Dict[str, Any] = {
                 "id": f"{channel_id}_{msg.id}",
                 "channel_id": str(channel_id),
@@ -953,6 +989,7 @@ class TelegramMonitor:
                     "forwards": forwards,
                     "reactions": reactions,
                 },
+                "topics": topics,
                 "status": "pending",
                 "moderation": None,
             }
@@ -1036,6 +1073,20 @@ class TelegramMonitor:
                     "last_name": getattr(sender, "last_name", None),
                 }
 
+            # Extract topics (hashtags) from album caption
+            topics: List[str] = []
+            try:
+                t = msg.message or ""
+                if t:
+                    seen = set()
+                    for m in re.finditer(r"(?<!\w)#([\w\d_А-Яа-яЁё]+)", t, flags=re.UNICODE):
+                        tag = "#" + m.group(1)
+                        if tag not in seen:
+                            seen.add(tag)
+                            topics.append(tag)
+            except Exception:
+                topics = []
+
             payload: Dict[str, Any] = {
                 "id": f"{channel_id}_{msg.id}",
                 "channel_id": str(channel_id),
@@ -1052,6 +1103,7 @@ class TelegramMonitor:
                     "forwards": forwards,
                     "reactions": reactions,
                 },
+                "topics": topics,
                 "status": "pending",
                 "moderation": None,
             }
@@ -1210,13 +1262,19 @@ class TelegramMonitor:
         # Собираем итоговый текст: "<title-as-link>\n\n<text-with-formatting>"
         final_text, final_entities = self._compose_title_and_text(payload, src_text, src_entities)
 
-        # Добавим метку для автоапрувленных новостей в начале сообщения
+        # Префиксы: автоапрув и темы (теги)
         try:
+            prefixes: List[str] = []
             moderation = payload.get("moderation") or {}
             if moderation.get("auto_approved") and str(moderation.get("classification")).lower() == "news":
-                label = "✅ Автоапрув новостей\n"
-                shift = self._utf16_len(label)
-                final_text = label + final_text
+                prefixes.append("✅ Автоапрув новостей")
+            topics = payload.get("topics") or []
+            if topics:
+                prefixes.append("🔖 Теги: " + " ".join(topics))
+            if prefixes:
+                prefix_text = "\n".join(prefixes) + "\n"
+                shift = self._utf16_len(prefix_text)
+                final_text = prefix_text + final_text
                 shifted_entities = []
                 for e in final_entities or []:
                     e2 = dict(e)

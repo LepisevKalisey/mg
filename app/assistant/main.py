@@ -128,6 +128,13 @@ async def on_startup():
     if _scheduler_task is None:
         _scheduler_task = asyncio.create_task(_digest_scheduler())
 
+    # Обновление команд бота (для всплывающих подсказок)
+    try:
+        _update_bot_commands()
+        logger.info("Bot commands updated")
+    except Exception:
+        logger.warning("Failed to update bot commands")
+
     # Автоконфигурация вебхука
     if not settings.SERVICE_URL:
         logger.warning("SERVICE_URL_ASSISTANT не задан — пропускаю автоконфигурацию вебхука")
@@ -225,6 +232,7 @@ def _send_message(chat_id: int, text: str, reply_to_message_id: Optional[int] = 
         "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True,
+        "parse_mode": "Markdown",
     }
     if reply_to_message_id:
         body["reply_to_message_id"] = reply_to_message_id
@@ -411,12 +419,37 @@ def _load_agg_config() -> Dict[str, Any]:
 
 def _save_agg_config(cfg: Dict[str, Any]) -> bool:
     try:
+        os.makedirs(os.path.dirname(settings.AGGREGATOR_CONFIG_PATH), exist_ok=True)
         with open(settings.AGGREGATOR_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         return True
     except Exception:
         logger.exception("Failed to write aggregator config")
         return False
+
+
+def _update_bot_commands() -> None:
+    cmds = [
+        {"command": "help", "description": "Справка по доступным командам"},
+        {"command": "add_source", "description": "Добавить источник: @channel или t.me/link"},
+        {"command": "remove_source", "description": "Удалить источник"},
+        {"command": "list_sources", "description": "Список источников"},
+        {"command": "quiet", "description": "Тихий режим on/off"},
+        {"command": "quiet_schedule", "description": "Настроить тихие часы HH:MM-HH:MM или off"},
+        {"command": "digest_time", "description": "Время(а) публикации дайджеста"},
+        {"command": "digest_limit", "description": "Лимит постов в дайджесте"},
+        {"command": "publish_now", "description": "Запустить публикацию сейчас"},
+        {"command": "status", "description": "Показать статусы и настройки"},
+        {"command": "autoapprove_news", "description": "Автоапрув новостей on/off"},
+        {"command": "autoapprove_expert", "description": "Автоапрув аналитики on/off"},
+        {"command": "classify", "description": "Классификация постов on/off"},
+        {"command": "news_to_approval", "description": "Новости на апрув on/off"},
+        {"command": "others_to_approval", "description": "Прочие посты на апрув on/off"},
+    ]
+    try:
+        _tg_api("setMyCommands", {"commands": cmds})
+    except Exception:
+        logger.warning("Failed to set bot commands")
 
 
 def _help_text() -> str:
@@ -708,59 +741,76 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
 
     if cmd == "/status":
         try:
-            # Собираем статусы сервисов
-            self_status = {"service": "assistant", "status": "ok"}
-            col_status = None
-            try:
-                col_status = _rest_call("GET", settings.COLLECTOR_URL.rstrip("/") + "/health")
-            except Exception:
-                col_status = None
-            agg_status = None
-            if settings.AGGREGATOR_URL:
-                try:
-                    agg_status = _rest_call("GET", settings.AGGREGATOR_URL.rstrip("/") + "/health")
-                except Exception:
-                    agg_status = None
-
-            # Конфигурация агрегатора (расписание и лимиты)
+            # Собираем конфиг агрегатора и счётчики
             cfg = _load_agg_config()
             schedules = cfg.get("schedules") or ([cfg.get("schedule")] if cfg.get("schedule") else [])
             limit = cfg.get("limit")
-            # Подсчёт количества файлов в approved
+            cfg_auto_news = cfg.get("auto_approve_news")
+            cfg_auto_expert = cfg.get("auto_approve_expert")
             approved_count = None
             try:
                 approved_count = len([f for f in os.listdir(settings.APPROVED_DIR) if f.endswith('.json')])
             except Exception:
                 approved_count = None
 
-            lines: list[str] = []
-            lines.append("Assistant:\n" + "status: ok")
+            # Проверяем статусы сервисов через /health
+            def _check(url: Optional[str]) -> Optional[Dict[str, Any]]:
+                if not url:
+                    return None
+                try:
+                    return _rest_call("GET", url.rstrip("/") + "/health")
+                except Exception:
+                    return None
+
+            assistant_status = {"service": "assistant", "status": "ok"}
+            collector_status = _check(settings.COLLECTOR_URL)
+            aggregator_status = _check(settings.AGGREGATOR_URL)
+            scheduler_status = _check(settings.SCHEDULER_URL)
+            summarizer_status = _check(settings.SUMMARIZER_URL)
+            publisher_status = _check(settings.PUBLISHER_URL)
+            classifier_status = _check(settings.ASSISTANT_CLASSIFIER_URL)
+
             # Информация о вебхуке
             wh_info = _tg_api("getWebhookInfo", {}) or {}
-            result = wh_info.get("result", {}) if isinstance(wh_info, dict) else {}
+            wh_result = wh_info.get("result", {}) if isinstance(wh_info, dict) else {}
             expected_wh = (settings.SERVICE_URL.rstrip("/") + "/telegram/webhook") if settings.SERVICE_URL else None
-            curr_wh = result.get("url")
-            lines.append(f"webhook: current={curr_wh or 'none'}; expected={expected_wh or 'none'}")
+            curr_wh = wh_result.get("url")
+
+            # Формируем ответ с разделами и группировкой (Markdown)
+            lines: list[str] = []
+            lines.append("*Настройки*")
             lines.append(f"admin_chat: {settings.ADMIN_CHAT_ID if settings.ADMIN_CHAT_ID is not None else 'not set'}")
             lines.append(f"bot_token: {'set' if bool(settings.BOT_TOKEN) else 'not set'}")
+            lines.append(f"service_url: {settings.SERVICE_URL or 'not set'}")
+            lines.append(f"webhook: current={curr_wh or 'none'}; expected={expected_wh or 'none'}")
             lines.append(f"collector_url: {settings.COLLECTOR_URL}")
             lines.append(f"aggregator_url: {settings.AGGREGATOR_URL or 'not set'}")
+            lines.append(f"scheduler_url: {settings.SCHEDULER_URL or 'not set'}")
+            lines.append(f"summarizer_url: {settings.SUMMARIZER_URL or 'not set'}")
+            lines.append(f"publisher_url: {settings.PUBLISHER_URL or 'not set'}")
+            lines.append(f"classifier_url: {settings.ASSISTANT_CLASSIFIER_URL or 'not set'}")
+            lines.append(f"schedules: {', '.join(schedules) if schedules else 'not set'}")
+            lines.append(f"limit: {limit}")
+            lines.append(f"auto_approve_news: {'on' if cfg_auto_news else 'off'}")
+            lines.append(f"auto_approve_expert: {'on' if cfg_auto_expert else 'off'}")
+            lines.append(f"approved_count: {approved_count}")
             lines.append("")
 
-            # Collector
+            lines.append("*Статусы сервисов*")
+
+            # Core группа
+            lines.append("Assistant:")
+            lines.append("status: ok")
+            lines.append("")
+
             lines.append("Collector:")
-            if not col_status:
+            if not collector_status:
                 lines.append("status: недоступен")
             else:
-                st = col_status.get("status") or "unknown"
-                authorized = col_status.get("authorized")
-                channels = col_status.get("channels") or []
-                quiet = (col_status.get("quiet") or {})
-                lines.append(f"status: {st}")
+                lines.append("status: ok")
                 lines.append(f"authorized: {authorized}")
                 lines.append(f"channels_count: {len(channels)}")
                 lines.append(f"quiet: manual={quiet.get('manual')} schedule={quiet.get('schedule')} now={quiet.get('quiet_now')}")
-                # Auto-approval/classification flags
                 try:
                     ap = _rest_call("GET", settings.COLLECTOR_URL.rstrip("/") + "/api/collector/autoapprove")
                     if ap and ap.get("ok"):
@@ -776,28 +826,44 @@ def _handle_command(chat_id: int, message_id: Optional[int], text: str) -> None:
                     pass
             lines.append("")
 
-            # Aggregator
             lines.append("Aggregator:")
-            if settings.AGGREGATOR_URL:
-                if not agg_status:
-                    lines.append("status: недоступен")
-                else:
-                    st = agg_status.get("status") or "unknown"
-                    lines.append(f"status: {st}")
-                    lines.append(f"output_dir: {agg_status.get('output_dir')}")
+            if not aggregator_status:
+                lines.append("status: недоступен")
             else:
-                lines.append("status: не сконфигурирован (AGGREGATOR_URL not set)")
+                st = aggregator_status.get("status") or "unknown"
+                lines.append(f"status: {st}")
+                lines.append(f"output_dir: {aggregator_status.get('output_dir')}")
             lines.append("")
 
-            # Aggregator config
-            lines.append("Aggregator config:")
-            lines.append(f"schedules: {', '.join(schedules) if schedules else 'not set'}")
-            lines.append(f"limit: {limit}")
-            lines.append(f"approved_count: {approved_count}")
-            cfg_auto_news = cfg.get("auto_approve_news")
-            cfg_auto_expert = cfg.get("auto_approve_expert")
-            lines.append(f"auto_approve_news: {'on' if cfg_auto_news else 'off'}")
-            lines.append(f"auto_approve_expert: {'on' if cfg_auto_expert else 'off'}")
+            lines.append("Scheduler:")
+            if not scheduler_status:
+                lines.append("status: недоступен")
+            else:
+                lines.append(f"status: {scheduler_status.get('status') or 'unknown'}")
+            lines.append("")
+
+            # ML группа
+            lines.append("Classifier:")
+            if not classifier_status:
+                lines.append("status: недоступен")
+            else:
+                lines.append(f"status: {classifier_status.get('status') or 'unknown'}")
+            lines.append("")
+
+            lines.append("Summarizer:")
+            if not summarizer_status:
+                lines.append("status: недоступен")
+            else:
+                lines.append(f"status: {summarizer_status.get('status') or 'unknown'}")
+            lines.append("")
+
+            # Publish группа
+            lines.append("Publisher:")
+            if not publisher_status:
+                lines.append("status: недоступен")
+            else:
+                lines.append(f"status: {publisher_status.get('status') or 'unknown'}")
+            lines.append("")
 
             _send_message(chat_id, "\n".join(lines))
         except Exception:
@@ -892,17 +958,3 @@ async def telegram_webhook(request: Request):
             _handle_auth_input(chat_id, text)
 
     return JSONResponse({"ok": True})
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    global _scheduler_task
-    if _scheduler_task is not None:
-        try:
-            _scheduler_task.cancel()
-        except Exception:
-            pass
-    try:
-        await asyncio.sleep(0.05)
-    except Exception:
-        pass

@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "id": "test-001",
+      "url": "https://t.me/examplechannel/123",
+      "source": "Пример Канал",
+      "topics": [
+        "ИИ",
+        "технологии"
+      ],
+      "classification": "news",
+      "text": "Тестовая новость про #ИИ и #технологии. Подробнее: https://example.com/news"
+    }
+  ]
+}

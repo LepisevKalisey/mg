@@ -48,6 +48,10 @@ class Settings:
         self.SCHEDULER_URL = _get_env("SCHEDULER_URL", "http://scheduler:8004")
         # URL Classifier API (опционально, если сервис существует)
         self.ASSISTANT_CLASSIFIER_URL = _get_env("CLASSIFIER_URL", "http://classifier:8003")
+        # URL Summarizer API (новый сервис)
+        self.SUMMARIZER_URL = _get_env("SUMMARIZER_URL", "http://summarizer:8005")
+        # URL Publisher API (новый сервис)
+        self.PUBLISHER_URL = _get_env("PUBLISHER_URL", "http://publisher:8006")
         self.AGGREGATOR_DIR = os.path.join(self.DATA_DIR, "aggregator")
         self.AGGREGATOR_CONFIG_PATH = os.path.join(self.AGGREGATOR_DIR, "config.json")
 

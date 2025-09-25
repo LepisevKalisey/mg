@@ -25,16 +25,21 @@ def _md_to_plain(text: str) -> str:
         return text
 
 
-def _publish_telegram(markdown_text: str, parse_mode: Optional[str]) -> bool:
+def _publish_telegram(markdown_text: str, parse_mode: Optional[str], meta: Optional[Dict[str, Any]] = None) -> bool:
     if not (settings.BOT_TOKEN and settings.TARGET_CHANNEL_ID):
         try:
             ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
-            fname = f"dry_{ts}.md"
-            fpath = os.path.join(settings.OUTPUT_DIR, fname)
-            with open(fpath, "w", encoding="utf-8") as f:
+            base = f"dry_{ts}"
+            fpath_md = os.path.join(settings.OUTPUT_DIR, base + ".md")
+            with open(fpath_md, "w", encoding="utf-8") as f:
                 f.write(markdown_text)
+            # Save meta JSON alongside
+            if meta is not None:
+                fpath_json = os.path.join(settings.OUTPUT_DIR, base + ".json")
+                with open(fpath_json, "w", encoding="utf-8") as jf:
+                    json.dump(meta, jf, ensure_ascii=False, indent=2)
             logger.warning(
-                f"Telegram publishing skipped (no BOT_TOKEN/TARGET_CHANNEL_ID). Dry-run saved: {fpath} (len={len(markdown_text)})"
+                f"Telegram publishing skipped (no BOT_TOKEN/TARGET_CHANNEL_ID). Dry-run saved: {fpath_md} (len={len(markdown_text)})"
             )
             return True
         except Exception as e:
@@ -155,9 +160,10 @@ async def health():
 async def publish(payload: Dict[str, Any] = Body(...)):
     text = payload.get("text") or ""
     parse_mode = payload.get("parse_mode") or settings.TELEGRAM_PARSE_MODE
+    meta = payload.get("meta")
     if not text:
         return JSONResponse({"ok": False, "result": "empty_text"})
-    ok = _publish_telegram(text, parse_mode)
+    ok = _publish_telegram(text, parse_mode, meta)
     return JSONResponse({"ok": ok, "result": "ok" if ok else "failed"})
 
 

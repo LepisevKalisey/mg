@@ -133,8 +133,20 @@ def _flush_channel(channel_id: str) -> None:
         if not settings.PUBLISHER_URL:
             logger.warning("Publisher URL not configured; skipping publish")
         else:
+            # Build meta payload
+            meta_items = []
+            for it in approved:
+                p = it.get("payload", {})
+                meta_items.append({
+                    "id": p.get("id"),
+                    "url": _build_message_url(p),
+                    "source": p.get("channel_title") or p.get("channel_name") or "",
+                    "topics": p.get("topics") or [],
+                    "classification": (p.get("moderation") or {}).get("classification"),
+                    "text": p.get("text") or (p.get("media") or {}).get("caption") or "",
+                })
             p_url = settings.PUBLISHER_URL.rstrip("/") + "/api/publisher/publish"
-            resp2 = _rest_call("POST", p_url, {"text": summary_text}) or {}
+            resp2 = _rest_call("POST", p_url, {"text": summary_text, "meta": {"items": meta_items}}) or {}
             published_ok = bool(resp2.get("ok"))
             logger.info("Publisher result ok=%s", published_ok)
     except Exception:

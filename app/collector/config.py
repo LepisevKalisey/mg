@@ -79,6 +79,8 @@ class Settings:
 
         # External classifier service URL
         self.CLASSIFIER_URL = _get_env("CLASSIFIER_URL", "http://classifier:8003")
+        # External aggregator service URL (для авто-публикации дайджеста)
+        self.AGGREGATOR_URL = _get_env("AGGREGATOR_URL", "http://aggregator:8002")
 
         # Channels list from file or env
         self.CHANNELS_FILE = _get_env("CHANNELS_FILE", os.path.join(self.DATA_DIR, "channels.txt"))
