@@ -458,4 +458,94 @@ API_HASH=376b4723b246f9a3f3e65039de8cf998
 PHONE_NUMBER=+77071793989
 
 https://github.com/LepisevKalisey/mg
-0.5.0-5services
+## Версия 0.5.0 — Расширение архитектуры до 5+ сервисов
+
+В этой версии система расширена и стала более модульной: добавлены сервисы Classifier, Scheduler, Summarizer и Publisher. Это позволяет выполнять интеллектуальную классификацию контента, планировать публикации, автоматически генерировать саммари и публиковать их в целевой канал.
+
+### Обновлённая архитектура
+
+Сервисы и порты (по умолчанию):
+- Collector (8001) — сбор сообщений из заданных Telegram-каналов
+- Assistant (8003) — модерация через Telegram бота и inline-кнопки, политика
+- Aggregator (8002) — создание дайджеста из одобренных сообщений
+- Classifier (8003) — сервис классификации (LLM/правила)
+- Scheduler (8004) — планировщик публикаций дайджеста
+- Summarizer (8005) — сервис генерации саммари
+- Publisher (8006) — публикация саммари/контента в целевой канал
+
+Поток данных:
+```
+Telegram → Collector → (Classifier) → pending/ → Assistant (модерация) → approved/ → Aggregator
+                                        │                                              │
+                                        └────────── Summarizer → Publisher ────────────┘
+                               Scheduler (триггеры публикации дайджеста Aggregator)
+```
+
+### Новые возможности
+- Классификация постов (Classifier):
+  - Опциональная интеграция с Gemini (при наличии ключа)
+  - Нормализация значений типа/тематики по спискам, заданным в окружении
+  - Возврат структуры: { type, topic, country, city }, с принудительной установкой "other" при несовпадении
+- Планировщик дайджеста (Scheduler):
+  - Автопубликация по расписанию (например, несколько слотов в день)
+- Генерация саммари (Summarizer):
+  - Подготовка кратких сводок по контенту для публикации
+- Публикация (Publisher):
+  - Отправка итогового контента/дайджеста в целевой канал
+
+### Конфигурация классификатора: списки типов и тематик
+
+Сервис Classifier использует два конфигурируемых списка для валидации выходов модели:
+- CLASSIFIER_TYPES — список допустимых типов постов
+- CLASSIFIER_TOPICS — список допустимых тематик
+
+Значения по умолчанию заданы в коде:
+- Типы: advertising, sponsored, announcement, sales, poll, digest, news, event, fact, results, expert opinion, analysis, story, other
+- Тематики: economics, politics, finance, Technology and Science, Culture and Arts, Health and Sports, Society and History, Automotive and Transport, Real Estate and Construction, business and entrepreneurship, other
+
+Как настроить списки через переменные окружения (запятая-разделитель):
+- CLASSIFIER_TYPES="advertising,sponsored,announcement,news,other"
+- CLASSIFIER_TOPICS="economics,politics,Technology and Science,other"
+
+Особенности:
+- Списки чувствительны к регистру и пробелам — значения должны совпадать с точностью до символа
+- Любое значение вне списков принудительно нормализуется в "other" на выходе
+- Можно использовать метки на любом языке, если модель/правила возвращают именно эти значения
+
+Дополнительные переменные окружения классификатора:
+- GEMINI_API_KEY — ключ для LLM (если пустой, используется упрощённая логика)
+- GEMINI_MODEL_NAME — имя модели (по умолчанию gemini-1.5-flash)
+- CLASSIFIER_TEXT_TRUNCATE_LIMIT — ограничение длины текста на вход (по умолчанию 4000)
+
+См. реализацию и парсинг окружения:
+- Classifier config: <mcfile name="config.py" path="c:\Projects\mg\app\classifier\config.py"></mcfile>
+- Classifier endpoint: <mcfile name="main.py" path="c:\Projects\mg\app\classifier\main.py"></mcfile>
+
+### Обновлённый поток модерации
+- Collector формирует payload и вызывает Classifier (если включено), чтобы получить тип/тематику
+- Assistant получает карточку в редакторский чат и применяет политику (в т.ч. тихие часы, автоапрув)
+- В payload добавляется раздел moderation с полями классификации и признаками авто-утверждения
+
+Пример дополнительных полей в payload:
+```json
+{
+  "moderation": {
+    "classification": {
+      "type": "news",
+      "topic": "economics",
+      "country": "Казахстан",
+      "city": "Алматы"
+    },
+    "auto_approved": false
+  }
+}
+```
+
+### Ключевые переменные окружения (дополнение)
+- Assistant: BOT_TOKEN (обязательно), ADMIN_CHAT_ID (для ограничений команд и уведомлений), SERVICE_URL_ASSISTANT (для вебхука)
+- Collector: API_ID, API_HASH, EDITORS_CHANNEL_ID (рекомендуется), CLASSIFIER_URL (адрес сервиса классификации), USE_GEMINI_CLASSIFY (включение/выключение внешней классификации)
+- Aggregator: расписание и лимиты через Assistant (хранится в data/aggregator/config.json)
+- Scheduler: SUMMARIZER_URL, PUBLISHER_URL, DATA_DIR
+- Summarizer/Publisher: соответствующие URL и DATA_DIR
+
+Эти переменные могут считываться из .env (в корне репозитория) и/или из окружения контейнеров (Docker Compose).
