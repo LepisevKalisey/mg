@@ -365,6 +365,23 @@ class TelegramMonitor:
             if not msgs or len(msgs) <= 1:
                 return
 
+            # Выбираем репрезентативное сообщение альбома: с непустым caption/текстом, иначе первый элемент
+            try:
+                msg = next((m for m in msgs if (getattr(m, "message", None) or "").strip()), msgs[0])
+            except Exception:
+                msg = msgs[0]
+
+            # Простая фильтрация рекламы/продвижения по caption/тексту альбома
+            if self._is_ad_or_promo(getattr(msg, "message", None)):
+                chat = await event.get_chat()
+                channel_title = getattr(chat, "title", None) or getattr(chat, "username", None) or "unknown"
+                logger.info(
+                    "Ad/promo detected, skipping album %s from channel '%s'",
+                    getattr(msg, "grouped_id", None),
+                    channel_title,
+                )
+                return
+
             # Берем чат (канал)
             chat = await event.get_chat()
             channel_id = getattr(chat, "id", None)
@@ -440,12 +457,12 @@ class TelegramMonitor:
 
             if decision.get("auto_approve"):
                 payload["status"] = "approved"
-                payload["moderation"] = {"classification": classification, "auto_approved": True}
+                payload["moderation"] = {**classification, "auto_approved": True}
                 path = save_approved_message(settings.APPROVED_DIR, payload)
                 logger.info(f"Saved approved album message: {path}")
                 return
             elif decision.get("send_to_approval"):
-                payload["moderation"] = {"classification": classification, "auto_approved": False}
+                payload["moderation"] = {**classification, "auto_approved": False}
                 path = save_pending_message(settings.PENDING_DIR, payload)
                 logger.info(f"Saved pending album message: {path}")
                 await self._send_to_editors(payload, path, source_message=msg)
@@ -458,120 +475,7 @@ class TelegramMonitor:
             logger.exception(f"Failed to process album: {e}")
 
     # ---- Formatting helpers ----
-    @staticmethod
-    def _utf16_len(s: str) -> int:
-        # Считаем длину строки в UTF-16 code units (как требует Bot API для offsets)
-        total = 0
-        for ch in s or "":
-            o = ord(ch)
-            total += 2 if o > 0xFFFF else 1
-        return total
-
-    def _map_entity(self, ent: Any) -> Optional[Dict[str, Any]]:
-        # Маппинг Telethon entity -> Bot API entity
-        if isinstance(ent, MessageEntityBold):
-            return {"type": "bold", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityItalic):
-            return {"type": "italic", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityUnderline):
-            return {"type": "underline", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityStrike):
-            return {"type": "strikethrough", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityCode):
-            return {"type": "code", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityPre):
-            d = {"type": "pre", "offset": ent.offset, "length": ent.length}
-            lang = getattr(ent, "language", None)
-            if lang:
-                d["language"] = lang
-            return d
-        if isinstance(ent, MessageEntityTextUrl):
-            return {"type": "text_link", "offset": ent.offset, "length": ent.length, "url": ent.url}
-        if isinstance(ent, MessageEntityUrl):
-            return {"type": "url", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityMention):
-            return {"type": "mention", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityHashtag):
-            return {"type": "hashtag", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityCashtag):
-            return {"type": "cashtag", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityBotCommand):
-            return {"type": "bot_command", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityEmail):
-            return {"type": "email", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityPhone):
-            return {"type": "phone_number", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntitySpoiler):
-            return {"type": "spoiler", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityBlockquote):
-            return {"type": "blockquote", "offset": ent.offset, "length": ent.length}
-        # Прочие не маппим
-        return None
-
-    def _extract_text_and_entities(self, msg: Message) -> Tuple[str, List[Dict[str, Any]]]:
-        text = msg.message or ""
-        entities = getattr(msg, "entities", None) or []
-        bot_entities: List[Dict[str, Any]] = []
-        for ent in entities:
-            mapped = self._map_entity(ent)
-            if mapped:
-                bot_entities.append(mapped)
-        return text, bot_entities
-
-    def _compose_title_and_text(self, payload: Dict[str, Any], text: str, entities: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
-        title = payload.get("channel_title") or payload.get("channel_name") or "Канал"
-        username = payload.get("channel_username")
-        msg_id = payload.get("message_id")
-        post_url = f"https://t.me/{username}/{msg_id}" if username else None
-
-        # Базовая строка — название канала (как ссылка, если возможно)
-        full_text = title
-        out_entities: List[Dict[str, Any]] = []
-        title_utf16 = self._utf16_len(title)
-        if post_url:
-            out_entities.append({
-                "type": "text_link",
-                "offset": 0,
-                "length": title_utf16,
-                "url": post_url,
-            })
-
-        if text:
-            # Добавим пустую строку и сам текст
-            prefix = f"{title}\n\n"
-            full_text = prefix + text
-            shift = self._utf16_len(prefix)
-            for e in entities:
-                e2 = dict(e)
-                e2["offset"] = e2["offset"] + shift
-                out_entities.append(e2)
-        else:
-            # Только заголовок
-            full_text = title if not username else title  # уже учли ссылку через entity выше
-
-        return full_text, out_entities
-
-    def _build_editor_text(self, payload: Dict[str, Any]) -> str:
-        # Больше не используется для отправки, но оставляем для совместимости вызовов, если где-то останется
-        title = payload.get("channel_title") or payload.get("channel_name") or "Канал"
-        username = payload.get("channel_username")
-        msg_id = payload.get("message_id")
-        url = None
-        if username:
-            url = f"https://t.me/{username}/{msg_id}"
-        text = payload.get("text") or (payload.get("media") or {}).get("caption") or "(без текста)"
-        excerpt = (text[:900] + "…") if len(text) > 900 else text
-
-        parts = [f"<b>Новый пост</b>", f"Канал: {('@'+username) if username else title}"]
-        if url:
-            parts.append(f"Ссылка: <a href=\"{url}\">открыть в Telegram</a>")
-        parts.append("")
-        parts.append(self._escape_html(excerpt))
-        return "\n".join(parts)
-
-    @staticmethod
-    def _escape_html(text: str) -> str:
-        return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # [duplicates removed] Helper functions duplicated later in file were removed to keep first implementations.
 
     async def _send_to_editors(self, payload: Dict[str, Any], saved_path: str, *, source_message: Optional[Message] = None, text_override: Optional[str] = None, entities_override: Optional[List[Dict[str, Any]]] = None) -> None:
         if not settings.BOT_TOKEN or not settings.EDITORS_CHANNEL_ID:
@@ -593,12 +497,17 @@ class TelegramMonitor:
         try:
             prefixes: List[str] = []
             moderation = payload.get("moderation") or {}
-            if moderation.get("auto_approved") and str(moderation.get("classification")).lower() == "news":
-                prefixes.append("✅ Автоапрув новостей")
-            # Добавим явную метку классификации
-            cls = str(moderation.get("classification") or "").lower()
-            if cls:
-                prefixes.append(f"🏷 Классификация: {'Новости' if cls == 'news' else 'Другое'}")
+            if isinstance(moderation, dict):
+                if moderation.get("auto_approved") and str(moderation.get("classification")).lower() == "news":
+                    prefixes.append("✅ Автоапрув новостей")
+                # Явная метка классификации
+                cls = str(moderation.get("classification") or "").lower()
+                if cls:
+                    prefixes.append(f"🏷 Классификация: {'Новости' if cls == 'news' else 'Другое'}")
+                # При наличии action — подскажем модераторам
+                action = str(moderation.get("action") or "").lower()
+                if action:
+                    prefixes.append(f"🧭 Действие: {action}")
             topics = payload.get("topics") or []
             if topics:
                 prefixes.append("🔖 Теги: " + " ".join(topics))
@@ -671,96 +580,7 @@ class TelegramMonitor:
         await asyncio.to_thread(_post_json, api_url, body)
 
     # Уведомляет в канал редакторов, что требуется авторизация, с кнопкой запуска.
-    async def notify_auth_required(self) -> None:
-        """Уведомляет в чат бота/админа, что требуется авторизация, с кнопкой запуска."""
-        if not settings.BOT_TOKEN or not settings.ADMIN_CHAT_ID:
-            logger.warning("BOT_TOKEN or ADMIN_CHAT_ID not configured. Skipping auth notification.")
-            return
-        # Определяем номер телефона для контекста уведомления
-        phone_hint = getattr(self, "_auth_phone", None) or (settings.PHONE_NUMBER or "не указан")
-        text = (
-            "❗ Требуется авторизация MTProto аккаунта для коллектора.\n"
-            f"Номер: {phone_hint}\n"
-            "Нажмите кнопку ниже, затем пришлите код из SMS/звонка в ответном сообщении."
-        )
-        reply_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "🔐 Авторизоваться", "callback_data": "auth:start"}
-                ]
-            ]
-        }
-        body = {
-            "chat_id": settings.ADMIN_CHAT_ID,
-            "text": text,
-            "disable_web_page_preview": True,
-            "reply_markup": reply_markup,
-        }
-        api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
-
-        def _post_json(url: str, data: Dict[str, Any]) -> None:
-            try:
-                req = urlrequest.Request(url, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
-                with urlrequest.urlopen(req, timeout=10) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"Bot API non-200 response: {resp.status}")
-            except HTTPError as he:
-                try:
-                    err_body = he.read().decode("utf-8")
-                except Exception:
-                    err_body = str(he)
-                logger.error(f"Bot API HTTPError: {he.code} {err_body}")
-            except URLError as ue:
-                logger.error(f"Bot API URLError: {ue}")
-            except Exception as e:
-                logger.exception(f"Bot API request failed: {e}")
-
-        await asyncio.to_thread(_post_json, api_url, body)
-
-    def auth_status(self) -> Dict[str, Any]:
-        return {
-            "authorized": self._authorized,
-            "awaiting_code": self._await_code,
-            "awaiting_password": self._await_password,
-            "phone": self._auth_phone,
-            "chat_id": self._auth_chat_id,
-        }
-
-    async def start_auth(self, phone: Optional[str], chat_id: Optional[int] = None) -> bool:
-        """Старт авторизации: отправляет код на номер телефона.
-        Если phone не задан — берём settings.PHONE_NUMBER. Сохраняем chat_id, чтобы ожидать ввод в нужном чате.
-        """
-        try:
-            if not self.client.is_connected():
-                await self.client.connect()
-            # Если уже авторизованы — ничего не делаем
-            self._authorized = await self.client.is_user_authorized()
-            if self._authorized:
-                self._await_code = False
-                self._await_password = False
-                return True
-
-            # Выбираем номер телефона
-            phone_num = (phone or settings.PHONE_NUMBER or '').strip()
-            if not phone_num:
-                logger.error("PHONE_NUMBER not provided and settings.PHONE_NUMBER is empty")
-                return False
-            self._auth_phone = phone_num
-            self._auth_chat_id = chat_id
-            # Запрашиваем код
-            res = await self.client.send_code_request(phone_num)
-            # Telethon возвращает структуру с phone_code_hash
-            try:
-                self._auth_hash = getattr(res, 'phone_code_hash', None)
-            except Exception:
-                self._auth_hash = None
-            self._await_code = True
-            self._await_password = False
-            logger.info("Auth code requested for %s", phone_num)
-            return True
-        except Exception as e:
-            logger.exception("start_auth failed: %s", e)
-            return False
+    # [duplicate removed] second implementation of auth notification and start_auth removed to keep the first ones
 
     async def submit_code(self, code: str) -> str:
         """Принимает код из SMS/звонка и завершает вход, либо включает режим запроса 2FA пароля.
@@ -859,17 +679,41 @@ class TelegramMonitor:
             "auto_publish_news": bool(settings.AUTO_PUBLISH_NEWS),
         }
 
-    async def _classify_post(self, text: Optional[str]) -> str:
-        """Return 'news' or 'other'. If classification disabled, treat as 'other'."""
-        if not settings.USE_GEMINI_CLASSIFY:
-            return "other"
+    async def _classify_post(self, text: Optional[str]) -> Dict[str, Any]:
+        """Вызывает внешний классификатор и возвращает расширенный словарь moderation.
+        Структура:
+        {
+          "classification": "news|expert|rejected|other",
+          "action": "reject|send_to_mod|debounce|auto_publish|queue_digest|unknown",
+          "editor_notify": {...} или None,
+          "publish_plan": {...} или None,
+          "digest_plan": {...} или None,
+          "post_id": str | None,
+          "cluster_id": str | None,
+          "raw": dict | None,
+        }
+        При недоступности классификатора используется локальная эвристика и настройки автоапрува.
+        """
         t = (text or "").strip()
+        f = self._get_auto_approve_flags()
+        # Базовый ответ по умолчанию
+        moderation: Dict[str, Any] = {
+            "classification": "other",
+            "action": "send_to_mod" if f["send_others_to_approval"] else "reject",
+            "editor_notify": None,
+            "publish_plan": None,
+            "digest_plan": None,
+            "post_id": None,
+            "cluster_id": None,
+            "raw": None,
+        }
         if not t:
-            return "other"
-        # Try external classifier first
+            return moderation
+
+        # Пытаемся вызвать внешний классификатор
         try:
             base = (settings.CLASSIFIER_URL or "").rstrip("/")
-            if base:
+            if base and settings.USE_GEMINI_CLASSIFY:
                 url = base + "/api/classifier/classify"
                 payload = {"text": t}
                 req = urlrequest.Request(
@@ -877,7 +721,7 @@ class TelegramMonitor:
                     data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                 )
-                with urlrequest.urlopen(req, timeout=5) as resp:
+                with urlrequest.urlopen(req, timeout=8) as resp:
                     status = getattr(resp, "status", 200)
                     body = resp.read().decode("utf-8")
                 if status == 200:
@@ -885,15 +729,53 @@ class TelegramMonitor:
                         data = json.loads(body)
                     except Exception:
                         data = None
+                    # Новый формат: напрямую содержит поля class/action/... без обёртки ok
+                    if isinstance(data, dict) and ("class" in data or "action" in data):
+                        raw_cls = str(data.get("class") or "").upper()
+                        cls_map = {"NEWS": "news", "EXPERT": "expert", "REJECTED": "rejected"}
+                        classification = cls_map.get(raw_cls, "other")
+                        raw_action = str(data.get("action") or "").upper()
+                        act_map = {
+                            "REJECT": "reject",
+                            "SEND_TO_MOD": "send_to_mod",
+                            "DEBOUNCE": "debounce",
+                            "AUTO_PUBLISH": "auto_publish",
+                            "QUEUE_DIGEST": "queue_digest",
+                        }
+                        action = act_map.get(raw_action, "unknown")
+                        moderation.update({
+                            "classification": classification,
+                            "action": action,
+                            "editor_notify": data.get("editor_notify"),
+                            "publish_plan": data.get("publish_plan"),
+                            "digest_plan": data.get("digest_plan"),
+                            "post_id": data.get("post_id"),
+                            "cluster_id": data.get("cluster_id"),
+                            "raw": data,
+                        })
+                        return moderation
+                    # Старый формат: { ok: true, is_news: bool }
                     if isinstance(data, dict) and data.get("ok") is True:
-                        return "news" if bool(data.get("is_news")) else "other"
+                        is_news = bool(data.get("is_news"))
+                        classification = "news" if is_news else "other"
+                        if classification == "news":
+                            action = "auto_publish" if (f["auto_publish_news"] and not f["send_news_to_approval"]) else "send_to_mod"
+                        else:
+                            action = "send_to_mod" if f["send_others_to_approval"] else "reject"
+                        moderation.update({
+                            "classification": classification,
+                            "action": action,
+                            "raw": data,
+                        })
+                        return moderation
         except HTTPError as he:
             logger.warning(f"Classifier HTTPError: {he.code}")
         except URLError as ue:
             logger.warning(f"Classifier URLError: {ue}")
         except Exception as e:
             logger.warning(f"Classifier call failed: {e}")
-        # Fallback to local heuristic
+
+        # Локальная эвристика на случай недоступности классификатора
         lower = t.lower()
         keywords = [
             "news", "breaking", "urgent", "report:", "reported",
@@ -901,18 +783,36 @@ class TelegramMonitor:
         ]
         score = sum(1 for w in keywords if w in lower)
         if score >= 1 and len(t) > 50:
-            return "news"
-        return "other"
-
-    def _decide_auto_approval(self, classification: str) -> Dict[str, bool]:
-        f = self._get_auto_approve_flags()
-        cls = (classification or "").lower()
-        if cls == "news":
-            auto = f["auto_publish_news"] and not f["send_news_to_approval"]
-            return {"auto_approve": auto, "send_to_approval": f["send_news_to_approval"]}
+            moderation["classification"] = "news"
+            moderation["action"] = "auto_publish" if (f["auto_publish_news"] and not f["send_news_to_approval"]) else "send_to_mod"
         else:
-            # Любая не-новость идёт в ручное утверждение согласно настройке для "other"
-            return {"auto_approve": False, "send_to_approval": f["send_others_to_approval"]}
+            moderation["classification"] = "other"
+            moderation["action"] = "send_to_mod" if f["send_others_to_approval"] else "reject"
+        return moderation
+
+    def _decide_auto_approval(self, moderation: Dict[str, Any]) -> Dict[str, bool]:
+        """Принимает решение на основе поля action из moderation и текущих флагов.
+        Возвращает словарь: { auto_approve: bool, send_to_approval: bool, drop: bool, queue_digest: bool }
+        """
+        action = str((moderation or {}).get("action") or "").lower()
+        result = {"auto_approve": False, "send_to_approval": False, "drop": False, "queue_digest": False}
+        if action == "auto_publish":
+            result["auto_approve"] = True
+        elif action == "send_to_mod":
+            result["send_to_approval"] = True
+        elif action == "queue_digest":
+            # пока нет отдельного пайплайна для дайджеста — отправим на модерацию
+            result["send_to_approval"] = True
+            result["queue_digest"] = True
+        elif action in ("reject", "debounce"):
+            result["drop"] = True
+        else:
+            # неизвестное действие — по умолчанию в модерацию, если включено, иначе дроп
+            f = self._get_auto_approve_flags()
+            result["send_to_approval"] = bool(f["send_others_to_approval"]) or bool(f["send_news_to_approval"])
+            if not result["send_to_approval"]:
+                result["drop"] = True
+        return result
 
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:
         """Обработка одиночного нового сообщения (не альбом)."""
@@ -1005,12 +905,12 @@ class TelegramMonitor:
 
             if decision.get("auto_approve"):
                 payload["status"] = "approved"
-                payload["moderation"] = {"classification": classification, "auto_approved": True}
+                payload["moderation"] = {**classification, "auto_approved": True}
                 path = save_approved_message(settings.APPROVED_DIR, payload)
                 logger.info(f"Saved approved message: {path}")
                 return
             elif decision.get("send_to_approval"):
-                payload["moderation"] = {"classification": classification, "auto_approved": False}
+                payload["moderation"] = {**classification, "auto_approved": False}
                 path = save_pending_message(settings.PENDING_DIR, payload)
                 logger.info(f"Saved pending message: {path}")
                 await self._send_to_editors(payload, path, source_message=msg)
@@ -1023,169 +923,10 @@ class TelegramMonitor:
             logger.exception(f"Failed to process new message: {e}")
 
 
-    async def _on_new_album(self, event: events.Album.Event) -> None:
-        """Обрабатываем альбом (media group) как единый пост: пересылаем только текстовую часть (капшен),
-        сохраняя форматирование, без дублирования по каждому медиа."""
-        try:
-            msgs: List[Message] = list(event.messages) if hasattr(event, "messages") else []
-            # Игнорируем альбомы из одного элемента (во избежание дублей с NewMessage)
-            if not msgs or len(msgs) <= 1:
-                return
-
-            # Берем чат (канал)
-            chat = await event.get_chat()
-            channel_id = getattr(chat, "id", None)
-            channel_username = getattr(chat, "username", None)
-            channel_title = getattr(chat, "title", None) or channel_username or "unknown"
-
-            # Выберем "основное" сообщение для текста (обычно в одном из элементов альбома есть caption)
-            primary = None
-            non_empty = [m for m in msgs if (m.message or "").strip()]
-            if non_empty:
-                primary = max(non_empty, key=lambda m: len(m.message))
-            else:
-                primary = msgs[0]
-            msg = primary
-            # Простая фильтрация рекламы/продвижения
-            if self._is_ad_or_promo(msg.message):
-                logger.info("Ad/promo detected, skipping album %s from channel '%s'", f"{channel_id}_{getattr(msg, 'id', None)}", channel_title)
-                return
-
-            # De-duplication guard (используем id выбранного сообщения альбома)
-            group_id = getattr(msg, "grouped_id", None) or (getattr(msgs[0], "grouped_id", None) if msgs else None)
-            if self._is_duplicate_and_mark(channel_id, group_id):
-                return
-
-            # Метаданные для сохранения
-            views = getattr(msg, "views", None)
-            forwards = getattr(msg, "forwards", None)
-            reactions = None
-            if getattr(msg, "reactions", None):
-                try:
-                    reactions = [
-                        {"emoji": getattr(c.reaction, "emoticon", None), "count": c.count}
-                        for c in msg.reactions.results
-                    ]
-                except Exception:
-                    reactions = None
-
-            author = {}
-            if msg.sender:
-                sender = await msg.get_sender()
-                author = {
-                    "id": getattr(sender, "id", None),
-                    "username": getattr(sender, "username", None),
-                    "first_name": getattr(sender, "first_name", None),
-                    "last_name": getattr(sender, "last_name", None),
-                }
-
-            # Extract topics (hashtags) from album caption
-            topics: List[str] = []
-            try:
-                t = msg.message or ""
-                if t:
-                    seen = set()
-                    for m in re.finditer(r"(?<!\w)#([\w\d_А-Яа-яЁё]+)", t, flags=re.UNICODE):
-                        tag = "#" + m.group(1)
-                        if tag not in seen:
-                            seen.add(tag)
-                            topics.append(tag)
-            except Exception:
-                topics = []
-
-            payload: Dict[str, Any] = {
-                "id": f"{channel_id}_{msg.id}",
-                "channel_id": str(channel_id),
-                "channel_name": str(channel_title),
-                "channel_username": channel_username,
-                "channel_title": channel_title,
-                "message_id": msg.id,
-                "text": msg.message,
-                "media": None,  # альбом не пересылаем, сохраняем только текст
-                "author": author,
-                "timestamp": msg.date.isoformat() if msg.date else None,
-                "metadata": {
-                    "views": views,
-                    "forwards": forwards,
-                    "reactions": reactions,
-                },
-                "topics": topics,
-                "status": "pending",
-                "moderation": None,
-            }
-
-            classification = await self._classify_post(msg.message)
-            decision = self._decide_auto_approval(classification)
-
-            if decision.get("auto_approve"):
-                payload["status"] = "approved"
-                payload["moderation"] = {"classification": classification, "auto_approved": True}
-                path = save_approved_message(settings.APPROVED_DIR, payload)
-                logger.info(f"Saved approved album message: {path}")
-                return
-            elif decision.get("send_to_approval"):
-                payload["moderation"] = {"classification": classification, "auto_approved": False}
-                path = save_pending_message(settings.PENDING_DIR, payload)
-                logger.info(f"Saved pending album message: {path}")
-                await self._send_to_editors(payload, path, source_message=msg)
-                return
-            else:
-                logger.info("Dropping album %s after classification '%s'", payload["id"], classification)
-                return
-
-        except Exception as e:
-            logger.exception(f"Failed to process album: {e}")
-
+    # Duplicate _on_new_album removed; first implementation retained above
     # ---- Formatting helpers ----
-    @staticmethod
-    def _utf16_len(s: str) -> int:
-        # Считаем длину строки в UTF-16 code units (как требует Bot API для offsets)
-        total = 0
-        for ch in s or "":
-            o = ord(ch)
-            total += 2 if o > 0xFFFF else 1
-        return total
+    # [duplicate helpers removed] Keeping first implementations of _utf16_len and _map_entity defined earlier.
 
-    def _map_entity(self, ent: Any) -> Optional[Dict[str, Any]]:
-        # Маппинг Telethon entity -> Bot API entity
-        if isinstance(ent, MessageEntityBold):
-            return {"type": "bold", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityItalic):
-            return {"type": "italic", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityUnderline):
-            return {"type": "underline", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityStrike):
-            return {"type": "strikethrough", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityCode):
-            return {"type": "code", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityPre):
-            d = {"type": "pre", "offset": ent.offset, "length": ent.length}
-            lang = getattr(ent, "language", None)
-            if lang:
-                d["language"] = lang
-            return d
-        if isinstance(ent, MessageEntityTextUrl):
-            return {"type": "text_link", "offset": ent.offset, "length": ent.length, "url": ent.url}
-        if isinstance(ent, MessageEntityUrl):
-            return {"type": "url", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityMention):
-            return {"type": "mention", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityHashtag):
-            return {"type": "hashtag", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityCashtag):
-            return {"type": "cashtag", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityBotCommand):
-            return {"type": "bot_command", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityEmail):
-            return {"type": "email", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityPhone):
-            return {"type": "phone_number", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntitySpoiler):
-            return {"type": "spoiler", "offset": ent.offset, "length": ent.length}
-        if isinstance(ent, MessageEntityBlockquote):
-            return {"type": "blockquote", "offset": ent.offset, "length": ent.length}
-        # Прочие не маппим
-        return None
 
     def _extract_text_and_entities(self, msg: Message) -> Tuple[str, List[Dict[str, Any]]]:
         text = msg.message or ""
@@ -1252,98 +993,7 @@ class TelegramMonitor:
     def _escape_html(text: str) -> str:
         return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    async def _send_to_editors(self, payload: Dict[str, Any], saved_path: str, *, source_message: Optional[Message] = None, text_override: Optional[str] = None, entities_override: Optional[List[Dict[str, Any]]] = None) -> None:
-        if not settings.BOT_TOKEN or not settings.EDITORS_CHANNEL_ID:
-            logger.warning("BOT_TOKEN or EDITORS_CHANNEL_ID not configured. Skipping send to editors.")
-            return
-
-        # Исходный текст и entities из сообщения (или переданные явно)
-        if text_override is not None and entities_override is not None:
-            src_text, src_entities = text_override, entities_override
-        elif source_message is not None:
-            src_text, src_entities = self._extract_text_and_entities(source_message)
-        else:
-            src_text, src_entities = payload.get("text") or "", []
-
-        # Собираем итоговый текст: "<title-as-link>\n\n<text-with-formatting>"
-        final_text, final_entities = self._compose_title_and_text(payload, src_text, src_entities)
-
-        # Префиксы: автоапрув и темы (теги)
-        try:
-            prefixes: List[str] = []
-            moderation = payload.get("moderation") or {}
-            if moderation.get("auto_approved") and str(moderation.get("classification")).lower() == "news":
-                prefixes.append("✅ Автоапрув новостей")
-            topics = payload.get("topics") or []
-            if topics:
-                prefixes.append("🔖 Теги: " + " ".join(topics))
-            if prefixes:
-                prefix_text = "\n".join(prefixes) + "\n"
-                shift = self._utf16_len(prefix_text)
-                final_text = prefix_text + final_text
-                shifted_entities = []
-                for e in final_entities or []:
-                    e2 = dict(e)
-                    if isinstance(e2.get("offset"), int):
-                        e2["offset"] = e2["offset"] + shift
-                    else:
-                        try:
-                            e2["offset"] = int(e2.get("offset", 0)) + shift
-                        except Exception:
-                            pass
-                    shifted_entities.append(e2)
-                final_entities = shifted_entities
-        except Exception:
-            # не прерываем отправку, если что-то пошло не так
-            pass
-
-        # Подготовим кнопки
-        file_name = os.path.basename(saved_path)
-        reply_markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "✅ Ok", "callback_data": f"approve:{file_name}"},
-                    {"text": "❌ Отмена", "callback_data": f"reject:{file_name}"},
-                ]
-            ]
-        }
-
-        body = {
-            "chat_id": settings.EDITORS_CHANNEL_ID,
-            "text": final_text,
-            "entities": final_entities,
-            "disable_web_page_preview": True,
-            "reply_markup": reply_markup,
-        }
-
-        # Тихие часы: отправляем без уведомлений
-        try:
-            if self.is_quiet_now():
-                body["disable_notification"] = True
-        except Exception:
-            pass
-
-        api_url = f"https://api.telegram.org/bot{settings.BOT_TOKEN}/sendMessage"
-
-        def _post_json(url: str, data: Dict[str, Any]) -> None:
-            try:
-                req = urlrequest.Request(url, data=json.dumps(data, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
-                with urlrequest.urlopen(req, timeout=10) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"Bot API non-200 response: {resp.status}")
-            except HTTPError as he:
-                try:
-                    err_body = he.read().decode("utf-8")
-                except Exception:
-                    err_body = str(he)
-                logger.error(f"Bot API HTTPError: {he.code} {err_body}")
-            except URLError as ue:
-                logger.error(f"Bot API URLError: {ue}")
-            except Exception as e:
-                logger.exception(f"Bot API request failed: {e}")
-
-        # Не блокируем event loop
-        await asyncio.to_thread(_post_json, api_url, body)
+    # [duplicate removed] second implementation of _send_to_editors was removed to keep the first one
 
     # Уведомляет в канал редакторов, что требуется авторизация, с кнопкой запуска.
     async def notify_auth_required(self) -> None:
@@ -1524,105 +1174,6 @@ class TelegramMonitor:
             if w and w in t:
                 return True
         return False
-
-
-    async def _on_new_album(self, event: events.Album.Event) -> None:
-        """Обрабатываем альбом (media group) как единый пост: пересылаем только текстовую часть (капшен),
-        сохраняя форматирование, без дублирования по каждому медиа."""
-        try:
-            msgs: List[Message] = list(event.messages) if hasattr(event, "messages") else []
-            # Игнорируем альбомы из одного элемента (во избежание дублей с NewMessage)
-            if not msgs or len(msgs) <= 1:
-                return
-
-            # Берем чат (канал)
-            chat = await event.get_chat()
-            channel_id = getattr(chat, "id", None)
-            channel_username = getattr(chat, "username", None)
-            channel_title = getattr(chat, "title", None) or channel_username or "unknown"
-
-            # Выберем "основное" сообщение для текста (обычно в одном из элементов альбома есть caption)
-            primary = None
-            non_empty = [m for m in msgs if (m.message or "").strip()]
-            if non_empty:
-                primary = max(non_empty, key=lambda m: len(m.message))
-            else:
-                primary = msgs[0]
-            msg = primary
-            # Простая фильтрация рекламы/продвижения
-            if self._is_ad_or_promo(msg.message):
-                logger.info("Ad/promo detected, skipping album %s from channel '%s'", f"{channel_id}_{getattr(msg, 'id', None)}", channel_title)
-                return
-
-            # De-duplication guard (используем id выбранного сообщения альбома)
-            group_id = getattr(msg, "grouped_id", None) or (getattr(msgs[0], "grouped_id", None) if msgs else None)
-            if self._is_duplicate_and_mark(channel_id, group_id):
-                return
-
-            # Метаданные для сохранения
-            views = getattr(msg, "views", None)
-            forwards = getattr(msg, "forwards", None)
-            reactions = None
-            if getattr(msg, "reactions", None):
-                try:
-                    reactions = [
-                        {"emoji": getattr(c.reaction, "emoticon", None), "count": c.count}
-                        for c in msg.reactions.results
-                    ]
-                except Exception:
-                    reactions = None
-
-            author = {}
-            if msg.sender:
-                sender = await msg.get_sender()
-                author = {
-                    "id": getattr(sender, "id", None),
-                    "username": getattr(sender, "username", None),
-                    "first_name": getattr(sender, "first_name", None),
-                    "last_name": getattr(sender, "last_name", None),
-                }
-
-            payload: Dict[str, Any] = {
-                "id": f"{channel_id}_{msg.id}",
-                "channel_id": str(channel_id),
-                "channel_name": str(channel_title),
-                "channel_username": channel_username,
-                "channel_title": channel_title,
-                "message_id": msg.id,
-                "text": msg.message,
-                "media": None,  # альбом не пересылаем, сохраняем только текст
-                "author": author,
-                "timestamp": msg.date.isoformat() if msg.date else None,
-                "metadata": {
-                    "views": views,
-                    "forwards": forwards,
-                    "reactions": reactions,
-                },
-                "status": "pending",
-                "moderation": None,
-            }
-
-            classification = await self._classify_post(msg.message)
-            decision = self._decide_auto_approval(classification)
-
-            if decision.get("auto_approve"):
-                payload["status"] = "approved"
-                payload["moderation"] = {"classification": classification, "auto_approved": True}
-                path = save_approved_message(settings.APPROVED_DIR, payload)
-                logger.info(f"Saved approved album message: {path}")
-                return
-            elif decision.get("send_to_approval"):
-                payload["moderation"] = {"classification": classification, "auto_approved": False}
-                path = save_pending_message(settings.PENDING_DIR, payload)
-                logger.info(f"Saved pending album message: {path}")
-                await self._send_to_editors(payload, path, source_message=msg)
-                return
-            else:
-                logger.info("Dropping album %s after classification '%s'", payload["id"], classification)
-                return
-
-        except Exception as e:
-            logger.exception(f"Failed to process album: {e}")
 
     # ---- Formatting helpers ----
     @staticmethod
